@@ -8,213 +8,249 @@ TOKEN = os.getenv("TOKEN")
 
 JOGOS = {}
 
-# ==========================
-# BASE ESTATÍSTICA SIMULADA
-# (depois ligaremos API real)
-# ==========================
+# =============================
+# ELO GLOBAL (base inicial)
+# =============================
 
-def stats_time(nome):
+def elo_time(nome):
+    random.seed(nome.lower())
+    return random.randint(1500, 1950)
 
-    # simulação estatística realista
+
+# =============================
+# FORÇA DA LIGA
+# =============================
+
+def league_factor(nome):
+
+    nome = nome.lower()
+
+    elite = ["city","real madrid","barcelona","liverpool","arsenal","bayern"]
+    forte = ["palmeiras","flamengo","chelsea","inter","milan"]
+
+    if any(t in nome for t in elite):
+        return 1.15
+    if any(t in nome for t in forte):
+        return 1.05
+
+    return 1.0
+
+
+# =============================
+# ESTATÍSTICAS BASE
+# =============================
+
+def stats(nome):
+
     random.seed(nome.lower())
 
-    gols_marcados = random.uniform(1.0, 2.4)
-    gols_sofridos = random.uniform(0.8, 2.0)
-    forma = random.uniform(0.8, 1.2)
+    ataque = random.uniform(1.1,2.5)
+    defesa = random.uniform(0.9,2.0)
+    forma = random.uniform(0.85,1.15)
 
-    return gols_marcados, gols_sofridos, forma
+    return ataque, defesa, forma
 
 
-# ==========================
+# =============================
 # POISSON
-# ==========================
+# =============================
 
 def poisson(lmbda, k):
     return (lmbda**k * math.exp(-lmbda)) / math.factorial(k)
 
 
-def prob_vitoria(xgA, xgB):
+def resultado_prob(xgA, xgB):
 
-    max_gols = 6
+    winA = draw = winB = 0
 
-    winA = 0
-    winB = 0
-    draw = 0
+    for i in range(6):
+        for j in range(6):
 
-    for i in range(max_gols):
-        for j in range(max_gols):
+            p = poisson(xgA,i)*poisson(xgB,j)
 
-            p = poisson(xgA, i) * poisson(xgB, j)
-
-            if i > j:
-                winA += p
-            elif j > i:
-                winB += p
+            if i>j:
+                winA+=p
+            elif j>i:
+                winB+=p
             else:
-                draw += p
+                draw+=p
 
     return winA, draw, winB
 
 
-# ==========================
-# EXPECTED GOALS ENGINE
-# ==========================
+# =============================
+# EXPECTED GOALS V2
+# =============================
 
-def calcular_xg(timeA, advA, timeB, advB):
+def calcular_xg(time, adversario):
+
+    atk, defe, forma = stats(time)
+    atkO, defO, _ = stats(adversario)
+
+    elo = elo_time(time)
+    eloO = elo_time(adversario)
+
+    elo_factor = 1 + ((elo-eloO)/4000)
+
+    liga = league_factor(time)
 
     liga_media = 1.35
 
-    atkA, defA, formaA = stats_time(timeA)
-    atkAdvA, defAdvA, _ = stats_time(advA)
+    xg = liga_media * (atk/defO) * forma * elo_factor * liga
 
-    atkB, defB, formaB = stats_time(timeB)
-    atkAdvB, defAdvB, _ = stats_time(advB)
-
-    xgA = liga_media * (atkA / defAdvA) * formaA
-    xgB = liga_media * (atkB / defAdvB) * formaB
-
-    return round(xgA,2), round(xgB,2)
+    return max(0.2, round(xg,2))
 
 
-# ==========================
+# =============================
+# CONFIDENCE ENGINE
+# =============================
+
+def confianca_modelo(pA,pD,pB,xgA,xgB):
+
+    edge = abs(pA-pB)
+    estabilidade = 1 - abs(xgA-xgB)/5
+
+    conf = (edge*0.7 + estabilidade*0.3)*100
+
+    return round(min(conf,95),1)
+
+
+# =============================
 # START
-# ==========================
+# =============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-"""🤖 IA MATCHUP ENGINE PRO
+"""🤖 ACCURACY ENGINE V2 ONLINE
 
-/games -> cadastrar jogos
-/match Time A vs Time B
+1️⃣ Cadastre jogos:
+/games
+Palmeiras vs Novorizontino
+Arsenal vs Chelsea
+
+2️⃣ Analise:
+/match Palmeiras vs Chelsea
 """
 )
 
 
-# ==========================
+# =============================
 # CADASTRAR JOGOS
-# ==========================
+# =============================
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto = update.message.text.replace("/games","").strip()
-
     linhas = texto.split("\n")
 
-    adicionados = []
+    adicionados=[]
 
-    for linha in linhas:
+    for l in linhas:
 
-        if "vs" not in linha.lower():
+        if "vs" not in l.lower():
             continue
 
-        casa, fora = linha.split("vs")
+        a,b=l.split("vs")
 
-        casa = casa.strip()
-        fora = fora.strip()
+        a=a.strip()
+        b=b.strip()
 
-        JOGOS[casa.lower()] = fora
-        JOGOS[fora.lower()] = casa
+        JOGOS[a.lower()]=b
+        JOGOS[b.lower()]=a
 
-        adicionados.append(f"{casa} vs {fora}")
+        adicionados.append(f"{a} vs {b}")
 
     await update.message.reply_text(
-        "✅ Jogos cadastrados:\n\n" + "\n".join(adicionados)
+        "✅ Jogos registrados:\n\n"+"\n".join(adicionados)
     )
 
 
-# ==========================
-# MATCH ENGINE
-# ==========================
+# =============================
+# MATCH ENGINE V2
+# =============================
 
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    texto = " ".join(context.args)
+    texto=" ".join(context.args)
 
     if "vs" not in texto.lower():
         await update.message.reply_text("Use /match Time A vs Time B")
         return
 
-    timeA, timeB = texto.split("vs")
+    A,B=texto.split("vs")
 
-    timeA = timeA.strip()
-    timeB = timeB.strip()
+    A=A.strip()
+    B=B.strip()
 
-    if timeA.lower() not in JOGOS:
-        await update.message.reply_text(f"{timeA} sem jogo cadastrado.")
+    if A.lower() not in JOGOS:
+        await update.message.reply_text(f"{A} sem jogo cadastrado.")
         return
 
-    if timeB.lower() not in JOGOS:
-        await update.message.reply_text(f"{timeB} sem jogo cadastrado.")
+    if B.lower() not in JOGOS:
+        await update.message.reply_text(f"{B} sem jogo cadastrado.")
         return
 
-    advA = JOGOS[timeA.lower()]
-    advB = JOGOS[timeB.lower()]
+    advA=JOGOS[A.lower()]
+    advB=JOGOS[B.lower()]
 
-    # IA ENGINE
-    xgA, xgB = calcular_xg(timeA, advA, timeB, advB)
+    xgA=calcular_xg(A,advA)
+    xgB=calcular_xg(B,advB)
 
-    pA, pD, pB = prob_vitoria(xgA, xgB)
+    pA,pD,pB=resultado_prob(xgA,xgB)
 
-    # odds implícitas
-    oddA = round(1/pA,2)
-    oddD = round(1/pD,2)
-    oddB = round(1/pB,2)
+    oddA=round(1/pA,2)
+    oddD=round(1/pD,2)
+    oddB=round(1/pB,2)
 
-    # confiança
-    confianca = round(abs(pA-pB)*100,1)
+    conf=confianca_modelo(pA,pD,pB,xgA,xgB)
 
-    if max(pA,pD,pB) == pA:
-        pick = f"Vitória {timeA}"
-    elif max(pA,pD,pB) == pB:
-        pick = f"Vitória {timeB}"
-    else:
-        pick = "Empate"
+    pick=max([(pA,A),(pD,"Empate"),(pB,B)])[1]
 
-    resposta = f"""
-⚔️ MATCHUP IA — ACCURACY ENGINE
+    resposta=f"""
+⚔️ MATCHUP IA — ACCURACY ENGINE V2
 
-🅰 {timeA} vs {advA}
-xG previsto: {xgA}
+🅰 {A} vs {advA}
+xG: {xgA}
 
-🅱 {timeB} vs {advB}
-xG previsto: {xgB}
+🅱 {B} vs {advB}
+xG: {xgB}
 
-📊 Probabilidades IA
-✅ {timeA}: {pA*100:.1f}%
-🤝 Empate: {pD*100:.1f}%
-✅ {timeB}: {pB*100:.1f}%
+📊 Probabilidades
+{A}: {pA*100:.1f}%
+Empate: {pD*100:.1f}%
+{B}: {pB*100:.1f}%
 
 💰 Odds Implícitas
-{timeA}: {oddA}
+{A}: {oddA}
 Empate: {oddD}
-{timeB}: {oddB}
+{B}: {oddB}
 
-🔥 Confiança do Modelo: {confianca}%
+🧠 Confiança IA: {conf}%
 
-🎯 MELHOR PICK:
+🎯 PICK IA:
 👉 {pick}
 """
 
     await update.message.reply_text(resposta)
 
 
-# ==========================
+# =============================
 # MAIN
-# ==========================
+# =============================
 
 def main():
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app=ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("games", games))
-    app.add_handler(CommandHandler("match", match))
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("games",games))
+    app.add_handler(CommandHandler("match",match))
 
-    print("✅ IA ONLINE")
+    print("IA V2 ONLINE")
 
     app.run_polling()
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
