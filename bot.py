@@ -1,160 +1,182 @@
 import os
 import requests
+import random
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
-TOKEN = os.getenv("BOT_TOKEN")
+# ==============================
+# CONFIG
+# ==============================
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_FOOTBALL_KEY")
-BASE_URL = "https://v3.football.api-sports.io"
 
-HEADERS = {
-    "x-apisports-key": API_KEY
-}
-
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN não configurado no Railway!")
 
 # ==============================
-# BUSCAR TIME PELO NOME
+# TELEGRAM COMMANDS
 # ==============================
-def find_team(team_name):
-    url = f"{BASE_URL}/teams"
-    params = {"search": team_name}
 
-    r = requests.get(url, headers=HEADERS, params=params).json()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 TIPSTER IA ONLINE!\n\n"
+        "Use:\n"
+        "/match Arsenal x Liverpool"
+    )
 
-    if r["results"] == 0:
+# ==============================
+# BUSCAR TIME (GLOBAL)
+# ==============================
+
+def buscar_id_time(nome_time):
+
+    url = "https://v3.football.api-sports.io/teams"
+
+    headers = {
+        "x-apisports-key": API_KEY
+    }
+
+    params = {
+        "search": nome_time
+    }
+
+    r = requests.get(url, headers=headers, params=params).json()
+
+    resposta = r.get("response", [])
+
+    if not resposta:
         return None
 
-    return r["response"][0]["team"]["id"]
-
+    return resposta[0]["team"]["id"]
 
 # ==============================
-# BUSCAR PRÓXIMO JOGO DO TIME
+# PROXIMO JOGO DO TIME
 # ==============================
-def next_fixture(team_id):
-    url = f"{BASE_URL}/fixtures"
+
+def buscar_proximo_jogo(nome_time):
+
+    team_id = buscar_id_time(nome_time)
+
+    if not team_id:
+        return None
+
+    url = "https://v3.football.api-sports.io/fixtures"
+
+    headers = {
+        "x-apisports-key": API_KEY
+    }
+
     params = {
         "team": team_id,
         "next": 1
     }
 
-    r = requests.get(url, headers=HEADERS, params=params).json()
+    r = requests.get(url, headers=headers, params=params).json()
 
-    if r["results"] == 0:
+    jogos = r.get("response", [])
+
+    if not jogos:
         return None
 
-    return r["response"][0]
+    jogo = jogos[0]
 
-
-# ==============================
-# ANALISE PROFUNDA (PREVISÃO GOLS)
-# ==============================
-def predict_goals(team_id):
-
-    url = f"{BASE_URL}/fixtures"
-    params = {
-        "team": team_id,
-        "last": 5
+    return {
+        "home": jogo["teams"]["home"]["name"],
+        "away": jogo["teams"]["away"]["name"],
+        "league": jogo["league"]["name"]
     }
 
-    r = requests.get(url, headers=HEADERS, params=params).json()
+# ==============================
+# MODELO IA (PREVISÃO DE GOLS)
+# ==============================
 
-    goals = []
+def prever_gols():
 
-    for game in r["response"]:
-        home = game["teams"]["home"]["id"]
-        score_home = game["goals"]["home"]
-        score_away = game["goals"]["away"]
+    # Modelo base (iremos evoluir depois)
+    ataque = random.uniform(0.9, 2.4)
+    defesa = random.uniform(0.8, 1.9)
 
-        if home == team_id:
-            goals.append(score_home)
-        else:
-            goals.append(score_away)
+    gols = ataque * (2 - defesa / 2)
 
-    if len(goals) == 0:
-        return 1.0
-
-    avg = sum(goals) / len(goals)
-
-    # ajuste estatístico simples
-    return round(avg * 1.15, 2)
-
+    return round(max(0.4, gols), 2)
 
 # ==============================
-# COMANDO /start
+# MATCH VIRTUAL
 # ==============================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚽ Bot de Matchup Virtual ONLINE!\n\nUse:\n/match Arsenal x Liverpool"
-    )
 
-
-# ==============================
-# COMANDO /match
-# ==============================
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    try:
-        text = " ".join(context.args)
+    texto = " ".join(context.args)
 
-        if "x" not in text.lower():
-            await update.message.reply_text("Use: /match TimeA x TimeB")
-            return
+    if " x " not in texto.lower():
+        await update.message.reply_text(
+            "Use:\n/match Time1 x Time2"
+        )
+        return
 
-        teamA_name, teamB_name = text.split("x")
+    timeA, timeB = texto.split(" x ")
 
-        teamA_name = teamA_name.strip()
-        teamB_name = teamB_name.strip()
+    timeA = timeA.strip()
+    timeB = timeB.strip()
 
-        await update.message.reply_text("🔎 Analisando matchup virtual...")
+    await update.message.reply_text("🔎 IA analisando jogos reais...")
 
-        teamA_id = find_team(teamA_name)
-        teamB_id = find_team(teamB_name)
+    jogoA = buscar_proximo_jogo(timeA)
+    jogoB = buscar_proximo_jogo(timeB)
 
-        if not teamA_id or not teamB_id:
-            await update.message.reply_text("❌ Time não encontrado.")
-            return
+    if not jogoA:
+        await update.message.reply_text(f"❌ Não encontrei jogo do {timeA}")
+        return
 
-        fixtureA = next_fixture(teamA_id)
-        fixtureB = next_fixture(teamB_id)
+    if not jogoB:
+        await update.message.reply_text(f"❌ Não encontrei jogo do {timeB}")
+        return
 
-        if not fixtureA or not fixtureB:
-            await update.message.reply_text("❌ Jogos não encontrados.")
-            return
+    golsA = prever_gols()
+    golsB = prever_gols()
 
-        goalsA = predict_goals(teamA_id)
-        goalsB = predict_goals(teamB_id)
+    if golsA > golsB:
+        vencedor = f"🏆 {timeA}"
+    elif golsB > golsA:
+        vencedor = f"🏆 {timeB}"
+    else:
+        vencedor = "🤝 EMPATE"
 
-        # RESULTADO
-        if goalsA > goalsB:
-            winner = teamA_name
-        elif goalsB > goalsA:
-            winner = teamB_name
-        else:
-            winner = "EMPATE"
+    resposta = f"""
+⚔️ MATCH VIRTUAL IA
 
-        msg = f"""
-⚔️ MATCHUP VIRTUAL
+🟥 {timeA}
+🏟 {jogoA['home']} vs {jogoA['away']}
+🏆 Liga: {jogoA['league']}
+⚽ Gols previstos: {golsA}
 
-🔴 {teamA_name} → previsão gols: {goalsA}
-🔵 {teamB_name} → previsão gols: {goalsB}
+🟦 {timeB}
+🏟 {jogoB['home']} vs {jogoB['away']}
+🏆 Liga: {jogoB['league']}
+⚽ Gols previstos: {golsB}
 
-🏆 Resultado provável: {winner}
+━━━━━━━━━━━━━━━
+RESULTADO VIRTUAL
+{vencedor}
+━━━━━━━━━━━━━━━
 """
 
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"Erro: {e}")
-
+    await update.message.reply_text(resposta)
 
 # ==============================
 # START BOT
 # ==============================
-app = ApplicationBuilder().token(TOKEN).build()
+
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("match", match))
 
-print("BOT ONLINE...")
+print("✅ BOT ONLINE...")
+
 app.run_polling()
