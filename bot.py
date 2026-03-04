@@ -5,77 +5,97 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
+API_KEY = os.getenv("API_KEY")
 
-API_KEY = "SUA_API_KEY_API_FOOTBALL"
 BASE_URL = "https://v3.football.api-sports.io"
-
 HEADERS = {"x-apisports-key": API_KEY}
 
-# =============================
-# CACHE GLOBAL DE TIMES
-# =============================
-TEAMS_CACHE = []
+# =========================
+# CACHE GLOBAL
+# =========================
+TEAMS = []
+
+# ligas principais mundiais
+LEAGUES = [
+    39,   # Premier League
+    140,  # La Liga
+    135,  # Serie A
+    78,   # Bundesliga
+    61,   # Ligue 1
+    71,   # Brasileirão
+    128,  # Argentina
+    253,  # MLS
+    2,    # Champions League
+]
+
+SEASON = 2024
 
 
-# =============================
-# CARREGAR TIMES (UMA VEZ)
-# =============================
-def carregar_times():
-    global TEAMS_CACHE
+# =========================
+# CARREGAR TIMES DO MUNDO
+# =========================
+def carregar_times_global():
 
-    print("Carregando base mundial de times...")
+    global TEAMS
 
-    url = f"{BASE_URL}/teams"
-    params = {"league": 39, "season": 2023}  # Premier League base
+    print("🌍 Carregando base GLOBAL...")
 
-    r = requests.get(url, headers=HEADERS, params=params)
-    data = r.json()
+    for league in LEAGUES:
 
-    TEAMS_CACHE = []
+        url = f"{BASE_URL}/teams"
+        params = {"league": league, "season": SEASON}
 
-    for t in data["response"]:
-        TEAMS_CACHE.append({
-            "id": t["team"]["id"],
-            "name": t["team"]["name"]
-        })
+        r = requests.get(url, headers=HEADERS, params=params)
 
-    print("Times carregados:", len(TEAMS_CACHE))
+        if r.status_code != 200:
+            continue
+
+        data = r.json()
+
+        for t in data["response"]:
+            TEAMS.append({
+                "id": t["team"]["id"],
+                "name": t["team"]["name"]
+            })
+
+    print(f"✅ {len(TEAMS)} times carregados.")
 
 
-# =============================
-# SIMILARIDADE DE TEXTO
-# =============================
+# =========================
+# SIMILARIDADE
+# =========================
 def similar(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-# =============================
-# BUSCA INTELIGENTE
-# =============================
-def buscar_time(nome_usuario):
+# =========================
+# BUSCA GLOBAL
+# =========================
+def buscar_time(nome):
 
     melhor = None
-    melhor_score = 0
+    score_max = 0
 
-    for team in TEAMS_CACHE:
-        score = similar(nome_usuario, team["name"])
+    for team in TEAMS:
+        score = similar(nome, team["name"])
 
-        if score > melhor_score:
-            melhor_score = score
+        if score > score_max:
+            score_max = score
             melhor = team
 
-    if melhor_score < 0.4:
+    if score_max < 0.35:
         return None
 
     return melhor["id"], melhor["name"]
 
 
-# =============================
+# =========================
 # PRÓXIMO JOGO
-# =============================
+# =========================
 def proximo_jogo(team_id):
 
     url = f"{BASE_URL}/fixtures"
+
     params = {
         "team": team_id,
         "next": 1
@@ -95,34 +115,45 @@ def proximo_jogo(team_id):
     return f"{home} vs {away}"
 
 
-# =============================
-# MODELO IA (base)
-# =============================
+# =========================
+# MODELO IA (BASE)
+# =========================
 def estimar_gols(nome):
+
     import random
-    return round(random.uniform(0.9, 2.6), 2)
+
+    base = random.uniform(0.9, 2.4)
+
+    # leve bônus para gigantes (simulação IA)
+    gigantes = ["real", "city", "bayern", "barcelona", "liverpool"]
+
+    if any(g in nome.lower() for g in gigantes):
+        base += 0.3
+
+    return round(base, 2)
 
 
-# =============================
-# /start
-# =============================
+# =========================
+# START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-        "🤖 IA MATCHUP VIRTUAL ONLINE\n\n"
+        "🌍 BOT IA GLOBAL ONLINE\n\n"
         "Use:\n"
-        "/match Palmeiras vs Blooming"
+        "/match Time A vs Time B"
     )
 
 
-# =============================
-# /match
-# =============================
+# =========================
+# MATCHUP GLOBAL
+# =========================
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto = " ".join(context.args)
 
     if "vs" not in texto.lower():
-        await update.message.reply_text("Use:\n/match Time A vs Time B")
+        await update.message.reply_text("Use:\n/match Arsenal vs Flamengo")
         return
 
     timeA_nome, timeB_nome = texto.lower().split("vs")
@@ -130,17 +161,17 @@ async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeA_nome = timeA_nome.strip()
     timeB_nome = timeB_nome.strip()
 
-    await update.message.reply_text("🔎 Buscando jogos mundiais...")
+    await update.message.reply_text("🔎 Escaneando futebol mundial...")
 
     timeA = buscar_time(timeA_nome)
     timeB = buscar_time(timeB_nome)
 
     if not timeA:
-        await update.message.reply_text(f"❌ Não encontrei {timeA_nome}")
+        await update.message.reply_text(f"❌ Time não encontrado: {timeA_nome}")
         return
 
     if not timeB:
-        await update.message.reply_text(f"❌ Não encontrei {timeB_nome}")
+        await update.message.reply_text(f"❌ Time não encontrado: {timeB_nome}")
         return
 
     idA, nomeA = timeA
@@ -164,36 +195,36 @@ async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vencedor = "EMPATE"
 
     resposta = f"""
-⚔️ MATCHUP VIRTUAL IA
+⚔️ MATCHUP VIRTUAL GLOBAL
 
 🅰 {nomeA}
 📅 {jogoA}
-⚽ Gols estimados: {golsA}
+⚽ Gols IA: {golsA}
 
 🅱 {nomeB}
 📅 {jogoB}
-⚽ Gols estimados: {golsB}
+⚽ Gols IA: {golsB}
 
-🏆 Resultado:
+🏆 Vencedor Virtual:
 👉 {vencedor}
 """
 
     await update.message.reply_text(resposta)
 
 
-# =============================
+# =========================
 # MAIN
-# =============================
+# =========================
 def main():
 
-    carregar_times()
+    carregar_times_global()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("match", match))
 
-    print("BOT ONLINE")
+    print("🤖 BOT GLOBAL ONLINE")
 
     app.run_polling()
 
