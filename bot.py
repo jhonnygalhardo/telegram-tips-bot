@@ -1,65 +1,103 @@
 import os
+import math
+import random
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
 
-# =====================
-# BANCO EM MEMÓRIA
-# =====================
 JOGOS = {}
 
-# =====================
-# MODELO IA (simulação)
-# =====================
-def estimar_gols(time, adversario):
+# ==========================
+# BASE ESTATÍSTICA SIMULADA
+# (depois ligaremos API real)
+# ==========================
 
-    import random
+def stats_time(nome):
 
-    base = random.uniform(0.8, 2.2)
+    # simulação estatística realista
+    random.seed(nome.lower())
 
-    gigantes = [
-        "palmeiras","flamengo","arsenal","city",
-        "real","barcelona","bayern","liverpool"
-    ]
+    gols_marcados = random.uniform(1.0, 2.4)
+    gols_sofridos = random.uniform(0.8, 2.0)
+    forma = random.uniform(0.8, 1.2)
 
-    if any(g in time.lower() for g in gigantes):
-        base += 0.4
-
-    return round(base,2)
+    return gols_marcados, gols_sofridos, forma
 
 
-# =====================
+# ==========================
+# POISSON
+# ==========================
+
+def poisson(lmbda, k):
+    return (lmbda**k * math.exp(-lmbda)) / math.factorial(k)
+
+
+def prob_vitoria(xgA, xgB):
+
+    max_gols = 6
+
+    winA = 0
+    winB = 0
+    draw = 0
+
+    for i in range(max_gols):
+        for j in range(max_gols):
+
+            p = poisson(xgA, i) * poisson(xgB, j)
+
+            if i > j:
+                winA += p
+            elif j > i:
+                winB += p
+            else:
+                draw += p
+
+    return winA, draw, winB
+
+
+# ==========================
+# EXPECTED GOALS ENGINE
+# ==========================
+
+def calcular_xg(timeA, advA, timeB, advB):
+
+    liga_media = 1.35
+
+    atkA, defA, formaA = stats_time(timeA)
+    atkAdvA, defAdvA, _ = stats_time(advA)
+
+    atkB, defB, formaB = stats_time(timeB)
+    atkAdvB, defAdvB, _ = stats_time(advB)
+
+    xgA = liga_media * (atkA / defAdvA) * formaA
+    xgB = liga_media * (atkB / defAdvB) * formaB
+
+    return round(xgA,2), round(xgB,2)
+
+
+# ==========================
 # START
-# =====================
+# ==========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-"""🤖 BOT MATCHUP VIRTUAL
+"""🤖 IA MATCHUP ENGINE PRO
 
-1️⃣ Cadastre jogos:
-
-/games
-Palmeiras vs Novorizontino
-Arsenal vs Chelsea
-
-2️⃣ Crie duelo virtual:
-
-/match Palmeiras vs Chelsea
+/games -> cadastrar jogos
+/match Time A vs Time B
 """
 )
 
 
-# =====================
+# ==========================
 # CADASTRAR JOGOS
-# =====================
+# ==========================
+
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto = update.message.text.replace("/games","").strip()
-
-    if not texto:
-        await update.message.reply_text("Envie os jogos abaixo do comando.")
-        return
 
     linhas = texto.split("\n")
 
@@ -85,64 +123,86 @@ async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# =====================
-# MATCHUP
-# =====================
+# ==========================
+# MATCH ENGINE
+# ==========================
+
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto = " ".join(context.args)
 
     if "vs" not in texto.lower():
-        await update.message.reply_text("Use:\n/match Time A vs Time B")
+        await update.message.reply_text("Use /match Time A vs Time B")
         return
 
-    timeA_nome, timeB_nome = texto.split("vs")
+    timeA, timeB = texto.split("vs")
 
-    timeA_nome = timeA_nome.strip()
-    timeB_nome = timeB_nome.strip()
+    timeA = timeA.strip()
+    timeB = timeB.strip()
 
-    if timeA_nome.lower() not in JOGOS:
-        await update.message.reply_text(f"❌ {timeA_nome} não possui jogo cadastrado.")
+    if timeA.lower() not in JOGOS:
+        await update.message.reply_text(f"{timeA} sem jogo cadastrado.")
         return
 
-    if timeB_nome.lower() not in JOGOS:
-        await update.message.reply_text(f"❌ {timeB_nome} não possui jogo cadastrado.")
+    if timeB.lower() not in JOGOS:
+        await update.message.reply_text(f"{timeB} sem jogo cadastrado.")
         return
 
-    advA = JOGOS[timeA_nome.lower()]
-    advB = JOGOS[timeB_nome.lower()]
+    advA = JOGOS[timeA.lower()]
+    advB = JOGOS[timeB.lower()]
 
-    golsA = estimar_gols(timeA_nome, advA)
-    golsB = estimar_gols(timeB_nome, advB)
+    # IA ENGINE
+    xgA, xgB = calcular_xg(timeA, advA, timeB, advB)
 
-    if golsA > golsB:
-        vencedor = timeA_nome
-    elif golsB > golsA:
-        vencedor = timeB_nome
+    pA, pD, pB = prob_vitoria(xgA, xgB)
+
+    # odds implícitas
+    oddA = round(1/pA,2)
+    oddD = round(1/pD,2)
+    oddB = round(1/pB,2)
+
+    # confiança
+    confianca = round(abs(pA-pB)*100,1)
+
+    if max(pA,pD,pB) == pA:
+        pick = f"Vitória {timeA}"
+    elif max(pA,pD,pB) == pB:
+        pick = f"Vitória {timeB}"
     else:
-        vencedor = "EMPATE"
+        pick = "Empate"
 
     resposta = f"""
-⚔️ MATCHUP VIRTUAL
+⚔️ MATCHUP IA — ACCURACY ENGINE
 
-🅰 {timeA_nome}
-vs {advA}
-⚽ Gols previstos: {golsA}
+🅰 {timeA} vs {advA}
+xG previsto: {xgA}
 
-🅱 {timeB_nome}
-vs {advB}
-⚽ Gols previstos: {golsB}
+🅱 {timeB} vs {advB}
+xG previsto: {xgB}
 
-🏆 Vencedor Virtual:
-👉 {vencedor}
+📊 Probabilidades IA
+✅ {timeA}: {pA*100:.1f}%
+🤝 Empate: {pD*100:.1f}%
+✅ {timeB}: {pB*100:.1f}%
+
+💰 Odds Implícitas
+{timeA}: {oddA}
+Empate: {oddD}
+{timeB}: {oddB}
+
+🔥 Confiança do Modelo: {confianca}%
+
+🎯 MELHOR PICK:
+👉 {pick}
 """
 
     await update.message.reply_text(resposta)
 
 
-# =====================
+# ==========================
 # MAIN
-# =====================
+# ==========================
+
 def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -151,7 +211,7 @@ def main():
     app.add_handler(CommandHandler("games", games))
     app.add_handler(CommandHandler("match", match))
 
-    print("✅ BOT ONLINE")
+    print("✅ IA ONLINE")
 
     app.run_polling()
 
