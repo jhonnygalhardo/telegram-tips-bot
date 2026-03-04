@@ -1,3 +1,16 @@
+import os
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+TOKEN = os.getenv("BOT_TOKEN")
+
+# comando /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Bot de Tips IA Online!\nUse /tip para receber análise."
+    )
+
+# comando /tip
 async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jogo = "Liverpool vs Chelsea"
@@ -24,3 +37,12 @@ Chelsea: ❌➖✅❌
 """
 
     await update.message.reply_text(analise)
+
+# iniciar bot
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("tip", tip))
+
+print("Bot iniciado...")
+app.run_polling()
