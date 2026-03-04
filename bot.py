@@ -1,48 +1,47 @@
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from openai import OpenAI
 
 TOKEN = os.getenv("BOT_TOKEN")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Bot de Tips IA Online!\nUse /tip para receber análise."
+        "🤖 IA de Apostas Online!\nEnvie /tip para análise."
     )
 
-# comando /tip
 async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jogo = "Liverpool vs Chelsea"
 
-    analise = f"""
-⚽ TIP IA — Análise do Jogo
+    prompt = f"""
+Você é um analista profissional de apostas esportivas.
 
-🏟 Jogo: {jogo}
+Analise o jogo {jogo} considerando:
 
-📊 Forma recente:
-Liverpool: ✅✅❌✅
-Chelsea: ❌➖✅❌
+- forma recente
+- força ofensiva e defensiva
+- probabilidade de gols
+- cenário provável
+- sugestão de aposta segura
 
-🔥 Ataque mais eficiente: Liverpool
-🛡 Defesa mais sólida: Liverpool
-
-🎯 Probabilidade IA:
-✅ Vitória Liverpool — 62%
-🤝 Empate — 23%
-✅ Vitória Chelsea — 15%
-
-💡 Sugestão:
-➡️ Liverpool ou Over 1.5 gols
+Responda como tipster profissional usando emojis.
 """
+
+    resposta = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    analise = resposta.choices[0].message.content
 
     await update.message.reply_text(analise)
 
-# iniciar bot
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("tip", tip))
 
-print("Bot iniciado...")
+print("Bot IA iniciado...")
 app.run_polling()
