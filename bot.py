@@ -1,4 +1,4 @@
-import os
+import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from openai import OpenAI
@@ -45,3 +45,4 @@ app.add_handler(CommandHandler("tip", tip))
 
 print("Bot IA iniciado...")
 app.run_polling()
+
