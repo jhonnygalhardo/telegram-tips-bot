@@ -1,186 +1,135 @@
-import os
 import requests
-import logging
-import asyncio
-import unicodedata
-import difflib
+import pandas as pd
+import numpy as np
+from scipy.stats import poisson
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# =============================
-# CONFIGURAÇÃO
-# =============================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ===== CONFIGURAÇÕES =====
+TELEGRAM_TOKEN = "SEU_TELEGRAM_BOT_TOKEN"
+FOOTBALL_API_KEY = "SUA_FOOTBALL_API_KEY"
+API_URL = "https://api.football-data.org/v4/matches"
+HEADERS = {"X-Auth-Token": FOOTBALL_API_KEY}
+NUM_JOGOS = 5  # últimos jogos para análise
+MAX_GOALS = 10  # limite para Poisson
 
-TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-HOST = "v3.football.api-sports.io"
+# ===== FUNÇÃO PARA PEGAR PARTIDAS E ODDS =====
+def get_recent_matches(team_name):
+    response = requests.get(API_URL, headers=HEADERS)
+    data = response.json()
+    matches = []
+    for match in data.get("matches", []):
+        if team_name in [match["homeTeam"]["name"], match["awayTeam"]["name"]]:
+            matches.append({
+                "home": match["homeTeam"]["name"],
+                "away": match["awayTeam"]["name"],
+                "home_score": match["score"]["fullTime"]["home"],
+                "away_score": match["score"]["fullTime"]["away"],
+                "home_odds": match.get("odds", {}).get("homeWin", 2.0),
+                "draw_odds": match.get("odds", {}).get("draw", 3.0),
+                "away_odds": match.get("odds", {}).get("awayWin", 2.5)
+            })
+    return pd.DataFrame(matches).tail(NUM_JOGOS)
 
-DB_STATS = {}
-
-# =============================
-# FUNÇÕES AUXILIARES
-# =============================
-def normalize(text):
-    """Remove acentos e coloca em lowercase"""
-    text = unicodedata.normalize('NFKD', text)
-    text = "".join([c for c in text if not unicodedata.combining(c)])
-    return text.lower().strip()
-
-def find_best_team(name, teams_list):
-    """Usa difflib para escolher o time mais próximo"""
-    names_normalized = [normalize(t['team']['name']) for t in teams_list]
-    match = difflib.get_close_matches(normalize(name), names_normalized, n=1, cutoff=0.5)
-    if match:
-        index = names_normalized.index(match[0])
-        return teams_list[index]['team']
-    return None
-
-def get_last_season_with_stats(team_id):
-    """Retorna a última temporada que tem jogos do time"""
-    headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": API_KEY}
-    for ano in [2026, 2025, 2024, 2023]:
-        res_l = requests.get(
-            f"https://{HOST}/leagues",
-            headers=headers,
-            params={"team": team_id, "season": ano},
-            timeout=10
-        ).json()
-        if res_l.get('response'):
-            for league in res_l['response']:
-                # Verifica se há estatísticas
-                res_s = requests.get(
-                    f"https://{HOST}/teams/statistics",
-                    headers=headers,
-                    params={"league": league['league']['id'], "season": ano, "team": team_id},
-                    timeout=10
-                ).json()
-                if res_s.get('response') and res_s['response'].get('fixtures', {}).get('played', {}).get('total', 0) > 0:
-                    return league['league']['id'], league['league']['name'], ano
-    return None, None, None
-
-# =============================
-# COMANDO /games
-# =============================
-async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.replace("/games", "").strip()
-    if "vs" not in texto.lower():
-        await update.message.reply_text("❌ Use: /games TimeA vs TimeB")
-        return
-
-    await update.message.reply_text("📡 Buscando estatísticas reais...")
-
-    times_input = [t.strip() for t in texto.lower().split("vs")]
-    headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": API_KEY}
-
-    for nome in times_input:
-        try:
-            # Busca times
-            res_t = requests.get(
-                f"https://{HOST}/teams",
-                headers=headers,
-                params={"search": nome},
-                timeout=10
-            ).json()
-
-            if not res_t.get('response'):
-                await update.message.reply_text(f"❌ Nenhum time encontrado para '{nome}'.")
-                continue
-
-            # Escolhe o melhor match
-            best_team = find_best_team(nome, res_t['response'])
-            if not best_team:
-                await update.message.reply_text(f"❌ Não foi possível identificar o time '{nome}'.")
-                continue
-
-            t_id = best_team['id']
-            t_nome = best_team['name']
-
-            # Última temporada com estatísticas
-            l_id, l_nome, ano = get_last_season_with_stats(t_id)
-            if not l_id:
-                await update.message.reply_text(f"⚠️ {t_nome} sem jogos registrados em ligas recentes.")
-                continue
-
-            # Busca estatísticas
-            res_s = requests.get(
-                f"https://{HOST}/teams/statistics",
-                headers=headers,
-                params={"league": l_id, "season": ano, "team": t_id},
-                timeout=10
-            ).json()
-
-            st = res_s['response']
-            played = st.get('fixtures', {}).get('played', {}).get('total', 0)
-            g_for = st.get('goals', {}).get('for', {}).get('total', {}).get('total', 0)
-            g_against = st.get('goals', {}).get('against', {}).get('total', {}).get('total', 0)
-
-            if played and played > 0:
-                m_atk = round(g_for / played, 2)
-                m_def = round(g_against / played, 2)
-                DB_STATS[normalize(nome)] = {"nome": t_nome, "atk": m_atk, "def": m_def}
-
-                await update.message.reply_text(
-                    f"✅ **{t_nome}** ({ano})\n🏆 {l_nome}\n🏟️ Jogos: {played}\n⚽ Atq: `{m_atk}` | Def: `{m_def}`"
-                )
-            else:
-                await update.message.reply_text(f"⚠️ {t_nome} não possui jogos registrados.")
-
-        except Exception as e:
-            logger.error(f"Erro ao processar '{nome}': {e}")
-            await update.message.reply_text(f"💥 Erro ao buscar {nome}.")
-
-# =============================
-# COMANDO /match
-# =============================
-async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args:
-            await update.message.reply_text("❌ Use: /match TimeA vs TimeB")
-            return
-
-        args = " ".join(context.args).lower().split("vs")
-        if len(args) < 2:
-            await update.message.reply_text("❌ Use: /match TimeA vs TimeB")
-            return
-
-        tA, tB = normalize(args[0].strip()), normalize(args[1].strip())
-
-        if tA not in DB_STATS or tB not in DB_STATS:
-            await update.message.reply_text("⚠️ Um dos times não possui estatísticas. Rode /games primeiro.")
-            return
-
-        dA, dB = DB_STATS[tA], DB_STATS[tB]
-
-        # xG simplificado
-        xgA = round((dA['atk'] + dB['def']) / 2, 2)
-        xgB = round((dB['atk'] + dA['def']) / 2, 2)
-
-        # Determinar resultado histórico
-        if abs(xgA - xgB) < 0.5:
-            resultado = "Equilibrio / Empate"
+# ===== FUNÇÃO POISSON PARA MÉDIA DE GOLS =====
+def poisson_expected_goals(team, opponent, team_matches, is_home=True):
+    if team_matches.empty:
+        return 1
+    goals_for = []
+    goals_against = []
+    for _, row in team_matches.iterrows():
+        if row["home"] == team:
+            goals_for.append(row["home_score"])
+            goals_against.append(row["away_score"])
         else:
-            resultado = f"Vitoria {dA['nome']}" if xgA > xgB else f"Vitoria {dB['nome']}"
+            goals_for.append(row["away_score"])
+            goals_against.append(row["home_score"])
+    
+    avg_for = np.mean(goals_for)
+    avg_against = np.mean(goals_against)
+    
+    # Vantagem casa/fora
+    if is_home:
+        avg_for *= 1.1
+        avg_against *= 0.9
+    else:
+        avg_for *= 0.9
+        avg_against *= 1.1
+    
+    expected_goals = (avg_for + avg_against) / 2
+    return expected_goals
 
-        await update.message.reply_text(
-            f"🔥 **{dA['nome']}** ({xgA}) vs **{dB['nome']}** ({xgB})\n\n🎯 Resultado Sugerido: `{resultado}`"
-        )
+# ===== FUNÇÃO PARA CALCULAR PROBABILIDADES E EV =====
+def analyze_matchup(team1, team2):
+    df1 = get_recent_matches(team1)
+    df2 = get_recent_matches(team2)
+    
+    if df1.empty or df2.empty:
+        return "Não há dados suficientes para os times selecionados."
+    
+    team1_goals = poisson_expected_goals(team1, team2, df1, is_home=True)
+    team2_goals = poisson_expected_goals(team2, team1, df2, is_home=False)
+    
+    # Matriz Poisson
+    prob_matrix = np.zeros((MAX_GOALS+1, MAX_GOALS+1))
+    for i in range(MAX_GOALS+1):
+        for j in range(MAX_GOALS+1):
+            prob_matrix[i,j] = poisson.pmf(i, team1_goals) * poisson.pmf(j, team2_goals)
+    
+    # Probabilidades de cada resultado
+    win_team1 = np.sum(np.tril(prob_matrix, -1))
+    win_team2 = np.sum(np.triu(prob_matrix, 1))
+    draw = np.sum(np.diag(prob_matrix))
+    
+    # Odds médias
+    home_odds = np.mean(df1["home_odds"].dropna()) if not df1.empty else 2.0
+    draw_odds = np.mean(df1["draw_odds"].dropna()) if not df1.empty else 3.0
+    away_odds = np.mean(df2["away_odds"].dropna()) if not df2.empty else 2.5
+    
+    # EV (Expected Value) = Probabilidade * Odds - 1
+    ev_team1 = win_team1 * home_odds - 1
+    ev_team2 = win_team2 * away_odds - 1
+    ev_draw = draw * draw_odds - 1
+    
+    # Resultado esperado
+    expected_score1 = round(team1_goals)
+    expected_score2 = round(team2_goals)
+    
+    # Índice de confiança
+    confidence = max(win_team1, win_team2, draw)
+    
+    result_text = f"{team1} {expected_score1} x {expected_score2} {team2}\nConfiança: {confidence:.2%}\n\n"
+    result_text += f"Probabilidades:\n{team1} vitória: {win_team1:.2%} | EV: {ev_team1:.2f}\n"
+    result_text += f"{team2} vitória: {win_team2:.2%} | EV: {ev_team2:.2f}\n"
+    result_text += f"Empate: {draw:.2%} | EV: {ev_draw:.2f}\n\n"
+    
+    # Sugestão de aposta
+    best_ev = max(ev_team1, ev_team2, ev_draw)
+    if best_ev == ev_team1:
+        result_text += f"💡 Sugestão: Apostar em {team1} (maior EV)"
+    elif best_ev == ev_team2:
+        result_text += f"💡 Sugestão: Apostar em {team2} (maior EV)"
+    else:
+        result_text += f"💡 Sugestão: Apostar no Empate (maior EV)"
+    
+    return result_text
 
-    except Exception as e:
-        logger.error(f"Erro no Match: {e}")
-        await update.message.reply_text("❌ Erro no Match.")
+# ===== COMANDOS TELEGRAM =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Olá! Envie /matchup time1 time2 para análise profissional com Poisson + Odds + EV + Confiança.")
 
-# =============================
-# MAIN
-# =============================
-if __name__ == "__main__":
-    if not TOKEN or not API_KEY:
-        logger.error("❌ TOKEN ou API_FOOTBALL_KEY não configurado.")
-        exit(1)
+async def matchup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 2:
+        await update.message.reply_text("Uso correto: /matchup Brasil França")
+        return
+    team1, team2 = context.args
+    result = analyze_matchup(team1, team2)
+    await update.message.reply_text(result)
 
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("games", games))
-    app.add_handler(CommandHandler("match", match))
+# ===== EXECUÇÃO DO BOT =====
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("matchup", matchup))
 
-    asyncio.run(app.run_polling())
+print("Bot de análise esportiva avançado iniciado...")
+app.run_polling()
