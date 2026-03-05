@@ -26,3 +26,4 @@ team_name = "Tottenham"
 team_id = get_team_id(team_name)
 fixtures = get_last_fixtures(team_id, 5)
 print(fixtures)  # Lista dos últimos 5 jogos
+
