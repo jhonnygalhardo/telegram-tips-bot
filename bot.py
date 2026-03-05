@@ -1,27 +1,10 @@
-import os
-import requests
-import math
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-# Configurações de Log para você ver no Railway
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-HOST = "v3.football.api-sports.io"
-
-DB_STATS = {}
-
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.replace("/games", "").strip()
     if "vs" not in texto.lower():
         await update.message.reply_text("❌ Formato: /games Time A vs Time B")
         return
 
-    await update.message.reply_text("📡 Varrendo TODAS as ligas disponíveis...")
+    await update.message.reply_text("📡 Calculando médias reais (Total Gols / Total Jogos)...")
 
     times_input = [t.strip() for t in texto.lower().split("vs")]
     headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": API_KEY}
@@ -37,57 +20,49 @@ async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t_id = res_t['response'][0]['team']['id']
             t_nome = res_t['response'][0]['team']['name']
 
-            # 2. Busca as Ligas desse time (focando em 2025/2026)
-            encontrou_gols = False
+            # 2. Busca Ligas e Stats (Temporada 2025/26)
+            encontrou_dados = False
+            # Tentamos 2025 (Europa) e 2026 (Brasil/Américas)
             for ano in [2026, 2025]:
-                # Puxa todas as ligas do time naquele ano
+                # Buscamos as ligas para ter o ID correto
                 res_l = requests.get(f"https://{HOST}/leagues", headers=headers, params={"team": t_id, "season": ano}, timeout=10).json()
-                
                 if not res_l.get('response'): continue
 
                 for item in res_l['response']:
-                    league_id = item['league']['id']
-                    league_name = item['league']['name']
+                    l_id = item['league']['id']
+                    l_nome = item['league']['name']
 
-                    # 3. Puxa estatística da liga encontrada
+                    # 3. Puxa Stats Brutas
                     res_s = requests.get(f"https://{HOST}/teams/statistics", headers=headers, 
-                                         params={"league": league_id, "season": ano, "team": t_id}, timeout=10).json()
+                                         params={"league": l_id, "season": ano, "team": t_id}, timeout=10).json()
                     
                     if res_s.get('response'):
-                        st = res_s['response']['goals']
-                        atk = st['for']['average']['total']
-                        dfs = st['against']['average']['total']
+                        st = res_s['response']
+                        
+                        # PEGANDO TOTAIS EM VEZ DE MÉDIAS
+                        jogos = st['fixtures']['played']['total']
+                        gols_feitos = st['goals']['for']['total']['total']
+                        gols_sofridos = st['goals']['against']['total']['total']
 
-                        # Se atk não for nulo e for maior que 0
-                        if atk and float(atk) > 0:
-                            DB_STATS[nome.lower()] = {"nome": t_nome, "atk": float(atk), "def": float(dfs)}
-                            await update.message.reply_text(f"✅ {t_nome} mapeado!\n🏆 {league_name} ({ano})\n⚽ Atq: {atk} | Def: {dfs}")
-                            encontrou_gols = True
+                        # Se o time jogou pelo menos 3 partidas na liga
+                        if jogos and jogos >= 3:
+                            m_atk = round(gols_feitos / jogos, 2)
+                            m_def = round(gols_sofridos / jogos, 2)
+                            
+                            DB_STATS[nome.lower()] = {"nome": t_nome, "atk": m_atk, "def": m_def}
+                            await update.message.reply_text(
+                                f"✅ **{t_nome} MAPEADO!**\n"
+                                f"🏆 Liga: {l_nome} ({ano})\n"
+                                f"🏟️ Jogos: {jogos}\n"
+                                f"⚽ Média Atq: `{m_atk}`\n"
+                                f"🛡️ Média Def: `{m_def}`"
+                            )
+                            encontrou_dados = True
                             break
-                if encontrou_gols: break
+                if encontrou_dados: break
 
-            if not encontrou_gols:
-                await update.message.reply_text(f"⚠️ {t_nome} encontrado, mas a API não tem médias de gols processadas para ele.")
+            if not encontrou_dados:
+                await update.message.reply_text(f"⚠️ {t_nome} encontrado, mas sem jogos suficientes registrados em 2025/26.")
 
         except Exception as e:
             await update.message.reply_text(f"💥 Erro em {nome}: {str(e)}")
-
-async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (A lógica do /match continua a mesma para processar os dados salvos)
-    args = " ".join(context.args).lower().split("vs")
-    if len(args) < 2: return
-    tA_in, tB_in = args[0].strip(), args[1].strip()
-    
-    if tA_in in DB_STATS and tB_in in DB_STATS:
-        dA, dB = DB_STATS[tA_in], DB_STATS[tB_in]
-        xgA = (dA['atk'] + dB['def']) / 2
-        xgB = (dB['atk'] + dA['atk']) / 2 # Ajustado para força relativa
-        await update.message.reply_text(f"🔥 **{dA['nome']}** ({xgA:.2f}) vs **{dB['nome']}** ({xgB:.2f})")
-    else:
-        await update.message.reply_text("❌ Use /games primeiro.")
-
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("games", games))
-    app.add_handler(CommandHandler("match", match))
-    app.run_polling(drop_pending_updates=True)
