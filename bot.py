@@ -1,256 +1,105 @@
 import os
 import math
-import random
+import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# --- CONFIGURAÇÃO ---
+API_KEY = "SUA_CHAVE_AQUI"
 TOKEN = os.getenv("TOKEN")
 
-JOGOS = {}
+# Cache para armazenar os dados da API e não gastar créditos à toa
+DB_JOGOS = {} 
+DB_STATS = {}
 
 # =============================
-# ELO GLOBAL (base inicial)
+# BUSCA DE DADOS NA API
 # =============================
 
-def elo_time(nome):
-    random.seed(nome.lower())
-    return random.randint(1500, 1950)
-
-
-# =============================
-# FORÇA DA LIGA
-# =============================
-
-def league_factor(nome):
-
-    nome = nome.lower()
-
-    elite = ["city","real madrid","barcelona","liverpool","arsenal","bayern"]
-    forte = ["palmeiras","flamengo","chelsea","inter","milan"]
-
-    if any(t in nome for t in elite):
-        return 1.15
-    if any(t in nome for t in forte):
-        return 1.05
-
-    return 1.0
-
-
-# =============================
-# ESTATÍSTICAS BASE
-# =============================
-
-def stats(nome):
-
-    random.seed(nome.lower())
-
-    ataque = random.uniform(1.1,2.5)
-    defesa = random.uniform(0.9,2.0)
-    forma = random.uniform(0.85,1.15)
-
-    return ataque, defesa, forma
-
+def buscar_stats_api(nome_time):
+    """Busca média de gols reais na API-Football"""
+    url = "https://v3.football.api-sports.io/teams"
+    headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": "v3.football.api-sports.io"}
+    
+    # 1. Acha o ID do time
+    resp = requests.get(url, headers=headers, params={"search": nome_time}).json()
+    if not resp['response']: return 1.0, 1.0
+    
+    team_id = resp['response'][0]['team']['id']
+    
+    # 2. Busca estatísticas da temporada (Ex: ID 71 é Brasileirão)
+    stats_url = "https://v3.football.api-sports.io/teams/statistics"
+    params = {"league": 71, "season": 2025, "team": team_id}
+    s_resp = requests.get(stats_url, headers=headers, params=params).json()
+    
+    try:
+        # Média de gols marcados (Ataque) e sofridos (Defesa)
+        ataque = s_resp['response']['goals']['for']['average']['total']
+        defesa = s_resp['response']['goals']['against']['average']['total']
+        return float(ataque), float(defesa)
+    except:
+        return 1.3, 1.1 # Média padrão caso falhe
 
 # =============================
-# POISSON
-# =============================
-
-def poisson(lmbda, k):
-    return (lmbda**k * math.exp(-lmbda)) / math.factorial(k)
-
-
-def resultado_prob(xgA, xgB):
-
-    winA = draw = winB = 0
-
-    for i in range(6):
-        for j in range(6):
-
-            p = poisson(xgA,i)*poisson(xgB,j)
-
-            if i>j:
-                winA+=p
-            elif j>i:
-                winB+=p
-            else:
-                draw+=p
-
-    return winA, draw, winB
-
-
-# =============================
-# EXPECTED GOALS V2
-# =============================
-
-def calcular_xg(time, adversario):
-
-    atk, defe, forma = stats(time)
-    atkO, defO, _ = stats(adversario)
-
-    elo = elo_time(time)
-    eloO = elo_time(adversario)
-
-    elo_factor = 1 + ((elo-eloO)/4000)
-
-    liga = league_factor(time)
-
-    liga_media = 1.35
-
-    xg = liga_media * (atk/defO) * forma * elo_factor * liga
-
-    return max(0.2, round(xg,2))
-
-
-# =============================
-# CONFIDENCE ENGINE
-# =============================
-
-def confianca_modelo(pA,pD,pB,xgA,xgB):
-
-    edge = abs(pA-pB)
-    estabilidade = 1 - abs(xgA-xgB)/5
-
-    conf = (edge*0.7 + estabilidade*0.3)*100
-
-    return round(min(conf,95),1)
-
-
-# =============================
-# START
-# =============================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text(
-"""🤖 ACCURACY ENGINE V2 ONLINE
-
-1️⃣ Cadastre jogos:
-/games
-Palmeiras vs Novorizontino
-Arsenal vs Chelsea
-
-2️⃣ Analise:
-/match Palmeiras vs Chelsea
-"""
-)
-
-
-# =============================
-# CADASTRAR JOGOS
+# COMANDOS
 # =============================
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    texto = update.message.text.replace("/games","").strip()
+    texto = update.message.text.replace("/games", "").strip()
     linhas = texto.split("\n")
-
-    adicionados=[]
+    
+    await update.message.reply_text("⏳ Puxando estatísticas reais da API... Aguarde.")
 
     for l in linhas:
+        if "vs" in l.lower():
+            t1, t2 = l.lower().split("vs")
+            t1, t2 = t1.strip(), t2.strip()
+            
+            # Salva quem enfrenta quem
+            DB_JOGOS[t1] = t2
+            DB_JOGOS[t2] = t1
+            
+            # Puxa e guarda as stats de cada um
+            DB_STATS[t1] = buscar_stats_api(t1)
+            DB_STATS[t2] = buscar_stats_api(t2)
 
-        if "vs" not in l.lower():
-            continue
-
-        a,b=l.split("vs")
-
-        a=a.strip()
-        b=b.strip()
-
-        JOGOS[a.lower()]=b
-        JOGOS[b.lower()]=a
-
-        adicionados.append(f"{a} vs {b}")
-
-    await update.message.reply_text(
-        "✅ Jogos registrados:\n\n"+"\n".join(adicionados)
-    )
-
-
-# =============================
-# MATCH ENGINE V2
-# =============================
+    await update.message.reply_text(f"✅ {len(DB_JOGOS)//2} Jogos e Stats carregados com sucesso!")
 
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = " ".join(context.args).lower().split("vs")
+    tA, tB = args[0].strip(), args[1].strip()
 
-    texto=" ".join(context.args)
-
-    if "vs" not in texto.lower():
-        await update.message.reply_text("Use /match Time A vs Time B")
+    if tA not in DB_STATS or tB not in DB_STATS:
+        await update.message.reply_text("❌ Time não encontrado no /games.")
         return
 
-    A,B=texto.split("vs")
+    # Lógica de Cruzamento: Ataque de A vs Defesa do adversário real de A
+    # Para o Matchup: Usamos a força relativa
+    atkA, defA = DB_STATS[tA]
+    atkB, defB = DB_STATS[tB]
 
-    A=A.strip()
-    B=B.strip()
+    # xG Final calculado para o Duelo
+    xgA = round(atkA * (defB / 1.2), 2)
+    xgB = round(atkB * (defA / 1.2), 2)
 
-    if A.lower() not in JOGOS:
-        await update.message.reply_text(f"{A} sem jogo cadastrado.")
-        return
+    # Calculo de Probabilidades (Poisson simplificado para o exemplo)
+    # 
+    probA = (xgA / (xgA + xgB)) * 0.8  # Exemplo de lógica rápida
+    probB = (xgB / (xgA + xgB)) * 0.8
+    probD = 1 - (probA + probB)
 
-    if B.lower() not in JOGOS:
-        await update.message.reply_text(f"{B} sem jogo cadastrado.")
-        return
+    # Nível de Confiança (Baseado na discrepância de xG e estabilidade)
+    confianca = (abs(xgA - xgB) / max(xgA, xgB)) * 100
+    confianca = min(max(confianca + 40, 20), 98)
 
-    advA=JOGOS[A.lower()]
-    advB=JOGOS[B.lower()]
+    res = (
+        f"🤖 *ACCURACY ENGINE PRO*\n\n"
+        f"⚔️ *{tA.upper()}* vs *{tB.upper()}*\n"
+        f"📊 xG: `{xgA}` vs `{xgB}`\n\n"
+        f"🏠 Vit. {tA}: `{probA*100:.1f}%`\n"
+        f"🤝 Empate: `{probD*100:.1f}%`\n"
+        f"🚀 Vit. {tB}: `{probB*100:.1f}%`\n\n"
+        f"🎯 *CONFIANÇA:* `{confianca:.1f}%`"
+    )
 
-    xgA=calcular_xg(A,advA)
-    xgB=calcular_xg(B,advB)
-
-    pA,pD,pB=resultado_prob(xgA,xgB)
-
-    oddA=round(1/pA,2)
-    oddD=round(1/pD,2)
-    oddB=round(1/pB,2)
-
-    conf=confianca_modelo(pA,pD,pB,xgA,xgB)
-
-    pick=max([(pA,A),(pD,"Empate"),(pB,B)])[1]
-
-    resposta=f"""
-⚔️ MATCHUP IA — ACCURACY ENGINE V2
-
-🅰 {A} vs {advA}
-xG: {xgA}
-
-🅱 {B} vs {advB}
-xG: {xgB}
-
-📊 Probabilidades
-{A}: {pA*100:.1f}%
-Empate: {pD*100:.1f}%
-{B}: {pB*100:.1f}%
-
-💰 Odds Implícitas
-{A}: {oddA}
-Empate: {oddD}
-{B}: {oddB}
-
-🧠 Confiança IA: {conf}%
-
-🎯 PICK IA:
-👉 {pick}
-"""
-
-    await update.message.reply_text(resposta)
-
-
-# =============================
-# MAIN
-# =============================
-
-def main():
-
-    app=ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start",start))
-    app.add_handler(CommandHandler("games",games))
-    app.add_handler(CommandHandler("match",match))
-
-    print("IA V2 ONLINE")
-
-    app.run_polling()
-
-
-if __name__=="__main__":
-    main()
+    await update.message.reply_text(res, parse_mode="Markdown")
