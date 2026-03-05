@@ -2,120 +2,152 @@ import os
 import math
 import requests
 import logging
+import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Logs para o Railway
+# Configuração de Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Variáveis de Ambiente
 TOKEN = os.getenv("TOKEN")
 API_KEY = os.getenv("API_FOOTBALL_KEY")
 HOST = "v3.football.api-sports.io"
 
-# Cache de estatísticas para evitar excesso de chamadas à API
+# Banco de Dados em Memória
 DB_STATS = {}
 
 # =============================
-# FUNÇÕES DE APOIO
+# UTILITÁRIOS
 # =============================
 
-def buscar_stats(nome_time):
+def remover_acentos(texto):
+    return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
+
+# =============================
+# MOTOR DE DADOS MULTILIGA
+# =============================
+
+def buscar_dados_api(nome_time):
     headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": API_KEY}
+    nome_busca = remover_acentos(nome_time).strip()
+    
     try:
-        # Busca o ID do time
-        r = requests.get(f"https://{HOST}/teams", headers=headers, params={"search": nome_time}, timeout=10).json()
-        if not r.get('response'): return None
+        # 1. Busca ID do Time
+        url_team = f"https://{HOST}/teams"
+        resp = requests.get(url_team, headers=headers, params={"search": nome_busca}, timeout=10).json()
         
-        t_id = r['response'][0]['team']['id']
-        t_nome = r['response'][0]['team']['name']
+        if not resp.get('response'):
+            return None
 
-        # Busca estatísticas (Tentando 2026, depois 2025)
+        team_id = resp['response'][0]['team']['id']
+        nome_oficial = resp['response'][0]['team']['name']
+
+        # 2. Busca Stats em múltiplas ligas (Argentina, Brasil, Inglaterra, Espanha, etc)
+        # 128: Argentina, 71: Brasil, 39: Premier League, 140: La Liga
+        ligas_para_testar = [128, 71, 39, 140, 2, 3] # Adicionado Copa Libertadores (13) e Champions (2)
+        
         for ano in [2026, 2025]:
-            # Nota: ID 71 (Brasil), 39 (EPL), 140 (Espanha). 
-            # Para ser pro, tentamos buscar a liga principal do time.
-            s = requests.get(f"https://{HOST}/teams/statistics", headers=headers, 
-                             params={"team": t_id, "season": ano, "league": 71}, timeout=10).json()
-            
-            if s.get('response') and s['response']['goals']['for']['average']['total']:
-                atk = float(s['response']['goals']['for']['average']['total'])
-                defe = float(s['response']['goals']['against']['average']['total'])
-                return {"nome": t_nome, "atk": atk, "def": defe}
+            for league_id in ligas_para_testar:
+                url_stats = f"https://{HOST}/teams/statistics"
+                params = {"league": league_id, "season": ano, "team": team_id}
+                s_resp = requests.get(url_stats, headers=headers, params=params, timeout=10).json()
+                
+                if s_resp.get('response'):
+                    stats = s_resp['response']['goals']['for']['average']
+                    if stats['total'] and stats['total'] != "0":
+                        g_pro = float(s_resp['response']['goals']['for']['average']['total'])
+                        g_contra = float(s_resp['response']['goals']['against']['average']['total'])
+                        
+                        return {"nome": nome_oficial, "atk": g_pro, "def": g_contra}
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Erro na API para {nome_time}: {e}")
         return None
 
-def calcular_probabilidades(xgA, xgB):
+# =============================
+# CÁLCULOS MATEMÁTICOS
+# =============================
+
+def calcular_poisson(lmbda, k):
+    return (math.pow(lmbda, k) * math.exp(-lmbda)) / math.factorial(k)
+
+def obter_probabilidades(xgA, xgB):
     winA = draw = winB = 0
     for i in range(8):
         for j in range(8):
-            prob = ((math.pow(xgA, i) * math.exp(-xgA)) / math.factorial(i)) * \
-                   ((math.pow(xgB, j) * math.exp(-xgB)) / math.factorial(j))
+            prob = calcular_poisson(xgA, i) * calcular_poisson(xgB, j)
             if i > j: winA += prob
             elif j > i: winB += prob
             else: draw += prob
     return winA, draw, winB
 
 # =============================
-# COMANDOS DO BOT
+# COMANDOS TELEGRAM
 # =============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 **ACCURACY ENGINE V6**\nUse /games para carregar e /match para analisar.")
+    await update.message.reply_text("🚀 **ACCURACY ENGINE V6**\n\nEnvie os jogos com `/games` para carregar as estatísticas da API.")
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.replace("/games", "").strip()
     if not texto:
-        await update.message.reply_text("Informe os jogos. Ex: Flamengo vs Vasco")
+        await update.message.reply_text("Exemplo: /games\nBoca Juniors vs Lanus")
         return
 
-    await update.message.reply_text("⏳ Puxando dados reais da API...")
+    await update.message.reply_text("⏳ Puxando dados reais da API... (Ligas: ARG, BRA, EUR)")
     
     linhas = texto.split("\n")
+    carregados = 0
     for linha in linhas:
         if "vs" in linha.lower():
             times = linha.lower().split("vs")
             for t in times:
                 nome = t.strip()
-                res = buscar_stats(nome)
-                if res: DB_STATS[nome] = res
+                if nome not in DB_STATS:
+                    dados = buscar_dados_api(nome)
+                    if dados:
+                        DB_STATS[nome] = dados
+                        carregados += 1
 
-    await update.message.reply_text(f"✅ Dados de {len(DB_STATS)} times prontos.")
+    await update.message.reply_text(f"✅ {carregados} novos times prontos para o Match!")
 
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = " ".join(context.args).lower().split("vs")
-    if len(args) < 2:
-        await update.message.reply_text("Use: /match TimeA vs TimeB")
-        return
+    try:
+        args = " ".join(context.args).lower().split("vs")
+        tA_in, tB_in = args[0].strip(), args[1].strip()
 
-    tA_in, tB_in = args[0].strip(), args[1].strip()
+        if tA_in not in DB_STATS or tB_in not in DB_STATS:
+            await update.message.reply_text("❌ Time não mapeado. Use /games primeiro.")
+            return
 
-    if tA_in not in DB_STATS or tB_in not in DB_STATS:
-        await update.message.reply_text("❌ Times não encontrados no /games.")
-        return
+        tA, tB = DB_STATS[tA_in], DB_STATS[tB_in]
 
-    tA = DB_STATS[tA_in]
-    tB = DB_STATS[tB_input]
+        # xG Cruzado: Força de ataque de A contra defesa de B
+        xgA = (tA['atk'] + tB['def']) / 2
+        xgB = (tB['atk'] + tA['def']) / 2
 
-    # Lógica de Cruzamento: Ataque de A vs Defesa de B
-    xgA = round((tA['atk'] + tB['def']) / 2, 2)
-    xgB = round((tB['atk'] + tA['def']) / 2, 2)
+        pA, pD, pB = obter_probabilidades(xgA, xgB)
+        
+        # Cálculo de Confiança Trader
+        conf = (abs(pA - pB) * 1.5 + pD) * 100
+        conf = min(max(conf, 20), 98)
 
-    pA, pD, pB = calcular_probabilidades(xgA, xgB)
-    
-    conf = min(max((abs(pA - pB) + pD) * 100, 20), 98)
-
-    resposta = (
-        f"📊 *ANÁLISE PROFISSIONAL*\n\n"
-        f"🏠 *{tA['nome']}* (xG: {xgA})\n"
-        f"🚀 *{tB['nome']}* (xG: {xgB})\n\n"
-        f"📈 Probabilidades:\n"
-        f"Win {tA['nome']}: `{pA*100:.1f}%` (Odd: `{1/pA:.2f}`)\n"
-        f"Empate: `{pD*100:.1f}%` (Odd: `{1/pD:.2f}`)\n"
-        f"Win {tB['nome']}: `{pB*100:.1f}%` (Odd: `{1/pB:.2f}`)\n\n"
-        f"🛡️ *CONFIANÇA:* `{conf:.1f}%`"
-    )
-    await update.message.reply_text(resposta, parse_mode="Markdown")
+        res = (
+            f"📊 *ANÁLISE PROFISSIONAL*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏠 *{tA['nome']}* (xG: {xgA:.2f})\n"
+            f"🚀 *{tB['nome']}* (xG: {xgB:.2f})\n\n"
+            f"📈 *CHANCES:*\n"
+            f"Vit. {tA['nome']}: `{pA*100:.1f}%`\n"
+            f"Empate: `{pD*100:.1f}%`\n"
+            f"Vit. {tB['nome']}: `{pB*100:.1f}%`\n\n"
+            f"🎯 *CONFIANÇA IA:* `{conf:.1f}%`"
+        )
+        await update.message.reply_text(res, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text("⚠️ Use: /match TimeA vs TimeB")
 
 # =============================
 # MAIN
@@ -126,4 +158,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("games", games))
     app.add_handler(CommandHandler("match", match))
+    
+    print("🤖 IA V6 EM OPERAÇÃO")
     app.run_polling(drop_pending_updates=True)
