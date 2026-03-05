@@ -1,3 +1,4 @@
+import os
 import requests
 import pandas as pd
 import numpy as np
@@ -5,18 +6,24 @@ from scipy.stats import poisson
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ===== CONFIGURAÇÕES =====
-TELEGRAM_TOKEN = "SEU_TELEGRAM_BOT_TOKEN"
-FOOTBALL_API_KEY = "SUA_FOOTBALL_API_KEY"
+# ===== VARIÁVEIS DE AMBIENTE =====
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY")
 API_URL = "https://api.football-data.org/v4/matches"
-HEADERS = {"X-Auth-Token": FOOTBALL_API_KEY}
+
+# ===== CONFIGURAÇÕES =====
 NUM_JOGOS = 5  # últimos jogos para análise
 MAX_GOALS = 10  # limite para Poisson
 
 # ===== FUNÇÃO PARA PEGAR PARTIDAS E ODDS =====
 def get_recent_matches(team_name):
-    response = requests.get(API_URL, headers=HEADERS)
-    data = response.json()
+    try:
+        response = requests.get(API_URL, headers={"X-Auth-Token": FOOTBALL_API_KEY})
+        data = response.json()
+    except Exception as e:
+        print("Erro ao acessar API:", e)
+        return pd.DataFrame()
+    
     matches = []
     for match in data.get("matches", []):
         if team_name in [match["homeTeam"]["name"], match["awayTeam"]["name"]]:
@@ -25,6 +32,7 @@ def get_recent_matches(team_name):
                 "away": match["awayTeam"]["name"],
                 "home_score": match["score"]["fullTime"]["home"],
                 "away_score": match["score"]["fullTime"]["away"],
+                # Odds simuladas se API não fornecer
                 "home_odds": match.get("odds", {}).get("homeWin", 2.0),
                 "draw_odds": match.get("odds", {}).get("draw", 3.0),
                 "away_odds": match.get("odds", {}).get("awayWin", 2.5)
@@ -76,7 +84,7 @@ def analyze_matchup(team1, team2):
         for j in range(MAX_GOALS+1):
             prob_matrix[i,j] = poisson.pmf(i, team1_goals) * poisson.pmf(j, team2_goals)
     
-    # Probabilidades de cada resultado
+    # Probabilidades
     win_team1 = np.sum(np.tril(prob_matrix, -1))
     win_team2 = np.sum(np.triu(prob_matrix, 1))
     draw = np.sum(np.diag(prob_matrix))
@@ -86,16 +94,14 @@ def analyze_matchup(team1, team2):
     draw_odds = np.mean(df1["draw_odds"].dropna()) if not df1.empty else 3.0
     away_odds = np.mean(df2["away_odds"].dropna()) if not df2.empty else 2.5
     
-    # EV (Expected Value) = Probabilidade * Odds - 1
+    # EV = Probabilidade * Odds - 1
     ev_team1 = win_team1 * home_odds - 1
     ev_team2 = win_team2 * away_odds - 1
     ev_draw = draw * draw_odds - 1
     
-    # Resultado esperado
     expected_score1 = round(team1_goals)
     expected_score2 = round(team2_goals)
     
-    # Índice de confiança
     confidence = max(win_team1, win_team2, draw)
     
     result_text = f"{team1} {expected_score1} x {expected_score2} {team2}\nConfiança: {confidence:.2%}\n\n"
@@ -103,7 +109,6 @@ def analyze_matchup(team1, team2):
     result_text += f"{team2} vitória: {win_team2:.2%} | EV: {ev_team2:.2f}\n"
     result_text += f"Empate: {draw:.2%} | EV: {ev_draw:.2f}\n\n"
     
-    # Sugestão de aposta
     best_ev = max(ev_team1, ev_team2, ev_draw)
     if best_ev == ev_team1:
         result_text += f"💡 Sugestão: Apostar em {team1} (maior EV)"
@@ -116,7 +121,9 @@ def analyze_matchup(team1, team2):
 
 # ===== COMANDOS TELEGRAM =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Olá! Envie /matchup time1 time2 para análise profissional com Poisson + Odds + EV + Confiança.")
+    await update.message.reply_text(
+        "Olá! Envie /matchup time1 time2 para análise profissional com Poisson + Odds + EV + Confiança."
+    )
 
 async def matchup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 2:
