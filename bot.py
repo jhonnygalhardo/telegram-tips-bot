@@ -1,105 +1,153 @@
 import os
 import math
 import requests
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- CONFIGURAÇÃO ---
-API_KEY = "SUA_CHAVE_AQUI"
-TOKEN = os.getenv("TOKEN")
+# Configuração de Logs para monitorar no Railway
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Cache para armazenar os dados da API e não gastar créditos à toa
-DB_JOGOS = {} 
+# --- VARIÁVEIS DE AMBIENTE (Configure no painel do Railway) ---
+TOKEN = os.getenv("TOKEN")
+API_KEY = os.getenv("API_FOOTBALL_KEY")
+HOST = "v3.football.api-sports.io"
+
+# Banco de dados temporário em memória
+DB_JOGOS = {}
 DB_STATS = {}
 
 # =============================
-# BUSCA DE DADOS NA API
+# MOTOR DE DADOS (API FOOTBALL)
 # =============================
 
-def buscar_stats_api(nome_time):
-    """Busca média de gols reais na API-Football"""
-    url = "https://v3.football.api-sports.io/teams"
-    headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": "v3.football.api-sports.io"}
+def buscar_dados_time(nome_time):
+    """Busca média de gols marcados/sofridos na API"""
+    headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": API_KEY}
     
-    # 1. Acha o ID do time
-    resp = requests.get(url, headers=headers, params={"search": nome_time}).json()
-    if not resp['response']: return 1.0, 1.0
-    
-    team_id = resp['response'][0]['team']['id']
-    
-    # 2. Busca estatísticas da temporada (Ex: ID 71 é Brasileirão)
-    stats_url = "https://v3.football.api-sports.io/teams/statistics"
-    params = {"league": 71, "season": 2025, "team": team_id}
-    s_resp = requests.get(stats_url, headers=headers, params=params).json()
-    
+    # 1. Busca ID do Time
     try:
-        # Média de gols marcados (Ataque) e sofridos (Defesa)
-        ataque = s_resp['response']['goals']['for']['average']['total']
-        defesa = s_resp['response']['goals']['against']['average']['total']
-        return float(ataque), float(defesa)
-    except:
-        return 1.3, 1.1 # Média padrão caso falhe
+        url_team = f"https://{HOST}/teams"
+        resp = requests.get(url_team, headers=headers, params={"search": nome_time}, timeout=10).json()
+        
+        if not resp.get('response'):
+            return 1.4, 1.2 # Fallback (médias neutras)
+            
+        team_id = resp['response'][0]['team']['id']
+        
+        # 2. Busca Stats da Temporada Atual (Ex: ID 71 = Brasileirão)
+        # Nota: Você pode ajustar o league_id conforme o campeonato
+        url_stats = f"https://{HOST}/teams/statistics"
+        params = {"league": 71, "season": 2026, "team": team_id}
+        s_resp = requests.get(url_stats, headers=headers, params=params, timeout=10).json()
+        
+        gols_pro = s_resp['response']['goals']['for']['average']['total']
+        gols_contra = s_resp['response']['goals']['against']['average']['total']
+        
+        return float(gols_pro), float(gols_contra)
+    except Exception as e:
+        logging.error(f"Erro na API para {nome_time}: {e}")
+        return 1.4, 1.2
 
 # =============================
-# COMANDOS
+# LÓGICA MATEMÁTICA (TRADER)
 # =============================
+
+def calcular_poisson(lmbda, k):
+    return (math.pow(lmbda, k) * math.exp(-lmbda)) / math.factorial(k)
+
+def processar_match(xgA, xgB):
+    winA = draw = winB = 0
+    # Matriz 7x7 para precisão de trader
+    for i in range(7):
+        for j in range(7):
+            prob = calcular_poisson(xgA, i) * calcular_poisson(xgB, j)
+            if i > j: winA += prob
+            elif j > i: winB += prob
+            else: draw += prob
+    return winA, draw, winB
+
+# =============================
+# COMANDOS DO BOT
+# =============================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 **ACCURACY ENGINE V4 ONLINE**\n\n1. Use `/games` para cadastrar a rodada.\n2. Use `/match` para analisar o duelo virtual.")
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.replace("/games", "").strip()
-    linhas = texto.split("\n")
-    
-    await update.message.reply_text("⏳ Puxando estatísticas reais da API... Aguarde.")
+    if not texto:
+        await update.message.reply_text("⚠️ Exemplo:\n/games\nFlamengo vs Vasco\nPalmeiras vs Santos")
+        return
 
-    for l in linhas:
-        if "vs" in l.lower():
-            t1, t2 = l.lower().split("vs")
+    await update.message.reply_text("⏳ Puxando dados reais da API... (Isso pode levar alguns segundos)")
+    
+    linhas = texto.split("\n")
+    for linha in linhas:
+        if "vs" in linha.lower():
+            t1, t2 = linha.lower().split("vs")
             t1, t2 = t1.strip(), t2.strip()
             
-            # Salva quem enfrenta quem
             DB_JOGOS[t1] = t2
             DB_JOGOS[t2] = t1
             
-            # Puxa e guarda as stats de cada um
-            DB_STATS[t1] = buscar_stats_api(t1)
-            DB_STATS[t2] = buscar_stats_api(t2)
+            # Busca e armazena stats
+            DB_STATS[t1] = buscar_dados_time(t1)
+            DB_STATS[t2] = buscar_dados_time(t2)
 
-    await update.message.reply_text(f"✅ {len(DB_JOGOS)//2} Jogos e Stats carregados com sucesso!")
+    await update.message.reply_text(f"✅ Rodada mapeada! {len(DB_STATS)} times prontos para análise.")
 
 async def match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = " ".join(context.args).lower().split("vs")
-    tA, tB = args[0].strip(), args[1].strip()
-
-    if tA not in DB_STATS or tB not in DB_STATS:
-        await update.message.reply_text("❌ Time não encontrado no /games.")
+    texto = " ".join(context.args).lower()
+    if "vs" not in texto:
+        await update.message.reply_text("❌ Use: `/match Flamengo vs Santos`")
         return
 
-    # Lógica de Cruzamento: Ataque de A vs Defesa do adversário real de A
-    # Para o Matchup: Usamos a força relativa
-    atkA, defA = DB_STATS[tA]
-    atkB, defB = DB_STATS[tB]
+    tA_nome, tB_nome = texto.split("vs")
+    tA_nome, tB_nome = tA_nome.strip(), tB_nome.strip()
 
-    # xG Final calculado para o Duelo
-    xgA = round(atkA * (defB / 1.2), 2)
-    xgB = round(atkB * (defA / 1.2), 2)
+    if tA_nome not in DB_STATS or tB_nome not in DB_STATS:
+        await update.message.reply_text("❌ Times não encontrados. Cadastre-os primeiro com `/games`.")
+        return
 
-    # Calculo de Probabilidades (Poisson simplificado para o exemplo)
-    # 
-    probA = (xgA / (xgA + xgB)) * 0.8  # Exemplo de lógica rápida
-    probB = (xgB / (xgA + xgB)) * 0.8
-    probD = 1 - (probA + probB)
+    # Dados reais coletados
+    atkA, defA = DB_STATS[tA_nome]
+    atkB, defB = DB_STATS[tB_nome]
 
-    # Nível de Confiança (Baseado na discrepância de xG e estabilidade)
-    confianca = (abs(xgA - xgB) / max(xgA, xgB)) * 100
-    confianca = min(max(confianca + 40, 20), 98)
+    # xG Cruzado (Ataque de um vs Defesa do outro)
+    xgA = round(atkA * (defB / 1.3), 2)
+    xgB = round(atkB * (defA / 1.3), 2)
+
+    pA, pD, pB = processar_match(xgA, xgB)
+
+    # Confiança baseada na margem de probabilidade
+    conf = (abs(pA - pB) + pD) * 100
+    conf_final = min(max(conf, 10), 96.5)
 
     res = (
-        f"🤖 *ACCURACY ENGINE PRO*\n\n"
-        f"⚔️ *{tA.upper()}* vs *{tB.upper()}*\n"
-        f"📊 xG: `{xgA}` vs `{xgB}`\n\n"
-        f"🏠 Vit. {tA}: `{probA*100:.1f}%`\n"
-        f"🤝 Empate: `{probD*100:.1f}%`\n"
-        f"🚀 Vit. {tB}: `{probB*100:.1f}%`\n\n"
-        f"🎯 *CONFIANÇA:* `{confianca:.1f}%`"
+        f"📊 *ANÁLISE DE MATCHUP VIRTUAL*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏠 *{tA_nome.upper()}* (xG: {xgA})\n"
+        f"🚀 *{tB_nome.upper()}* (xG: {xgB})\n\n"
+        f"📈 *PROBABILIDADES:*\n"
+        f"Win {tA_nome.upper()}: `{pA*100:.1f}%` (Odd: `{1/pA:.2f}`)\n"
+        f"Empate: `{pD*100:.1f}%` (Odd: `{1/pD:.2f}`)\n"
+        f"Win {tB_nome.upper()}: `{pB*100:.1f}%` (Odd: `{1/pB:.2f}`)\n\n"
+        f"🛡️ *CONFIANÇA IA:* `{conf_final:.1f}%`"
     )
 
     await update.message.reply_text(res, parse_mode="Markdown")
+
+# =============================
+# INICIALIZAÇÃO
+# =============================
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("games", games))
+    app.add_handler(CommandHandler("match", match))
+    
+    print("🤖 ENGINE V4 RODANDO NO RAILWAY...")
+    app.run_polling()
