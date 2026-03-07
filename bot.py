@@ -1,53 +1,60 @@
+import os
 import requests
 import numpy as np
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from datetime import date
 
-TOKEN = "8315861530:AAHgGl0JNKJ2fdn9lcXKmVqoU3VrZ82Afx8"
-API_KEY = "66a2917b1bfcdc820491650b86a28f75"
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_KEY = os.getenv("API_KEY")
 
 headers = {
     "x-apisports-key": API_KEY
 }
 
-# ligas que vamos analisar
-LEAGUES = [
-    39,   # Premier League
-    140,  # La Liga
-    135,  # Serie A
-    78,   # Bundesliga
-    61,   # Ligue 1
-    71,   # Brasileirão
-    253   # MLS
-]
 
 def get_games():
 
     today = date.today()
 
+    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
+
+    r = requests.get(url, headers=headers, timeout=10)
+
+    data = r.json()
+
     teams = []
 
-    for league in LEAGUES:
+    allowed_countries = [
+        "Brazil",
+        "USA",
+        "England",
+        "Spain",
+        "Italy",
+        "Germany",
+        "France",
+        "Portugal",
+        "Netherlands"
+    ]
 
-        url = f"https://v3.football.api-sports.io/fixtures?league={league}&date={today}"
+    for g in data.get("response", []):
 
-        r = requests.get(url, headers=headers, timeout=10)
+        country = g["league"]["country"]
 
-        data = r.json()
+        if country not in allowed_countries:
+            continue
 
-        for g in data.get("response", []):
+        home = g["teams"]["home"]["name"]
+        away = g["teams"]["away"]["name"]
 
-            home = g["teams"]["home"]["name"]
-            away = g["teams"]["away"]["name"]
-
-            teams.append(home)
-            teams.append(away)
+        teams.append(home)
+        teams.append(away)
 
     return list(set(teams))
 
 
-def random_strength(team):
+def random_strength():
 
     attack = np.random.uniform(0.8, 2.2)
     defense = np.random.uniform(0.8, 2.2)
@@ -65,13 +72,13 @@ def analyze_matchups(teams):
     results = []
 
     for i in range(len(teams)):
-        for j in range(i+1, len(teams)):
+        for j in range(i + 1, len(teams)):
 
             t1 = teams[i]
             t2 = teams[j]
 
-            att1, def1 = random_strength(t1)
-            att2, def2 = random_strength(t2)
+            att1, def1 = random_strength()
+            att2, def2 = random_strength()
 
             g1 = expected_goals(att1, def2)
             g2 = expected_goals(att2, def1)
@@ -93,7 +100,9 @@ def analyze_matchups(teams):
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("🔎 Analisando jogos da Europa, Brasil e EUA...")
+    await update.message.reply_text(
+        "🔎 Analisando jogos da Europa, Brasil e EUA..."
+    )
 
     teams = get_games()
 
@@ -115,13 +124,30 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
-if __name__ == "__main__":
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    await update.message.reply_text(
+        "🤖 Bot de Matchups\n\nUse /today para analisar jogos do dia."
+    )
 
+
+def main():
+
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN não definido")
+
+    if not API_KEY:
+        raise ValueError("API_KEY não definida")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
 
     print("Bot rodando...")
 
     app.run_polling()
 
+
+if __name__ == "__main__":
+    main()
