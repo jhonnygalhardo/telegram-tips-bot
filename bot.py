@@ -1,123 +1,155 @@
+import os
 import math
+import requests
 import itertools
+from datetime import date
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --------- POISSON ---------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_KEY = os.getenv("FOOTBALL_API")
 
-def poisson_prob(lam, k):
+headers = {
+    "x-apisports-key": API_KEY
+}
+
+# -----------------------------
+# POISSON
+# -----------------------------
+
+def poisson(lam, k):
     return (math.exp(-lam) * lam**k) / math.factorial(k)
 
-def goal_distribution(lam):
-    probs = {}
+def distribution(lam):
+
+    probs = []
+
     for i in range(5):
-        probs[i] = poisson_prob(lam, i)
-    probs["4+"] = 1 - sum(probs.values())
+        probs.append(poisson(lam,i))
+
+    probs.append(1 - sum(probs))
+
     return probs
 
-# --------- EXPECTED GOALS ---------
+# -----------------------------
+# EXPECTED GOALS
+# -----------------------------
 
-def expected_goals(attack, opp_defense, odd):
+def expected_goals(scored, conceded):
 
-    base = (attack + opp_defense) / 2
+    attack = scored / 10
+    defense = conceded / 10
 
-    if odd <= 1.70:
-        base *= 1.07
-    elif odd <= 2.10:
-        base *= 1.03
-    elif odd <= 2.80:
-        base *= 0.95
-    else:
-        base *= 0.90
+    return (attack + defense) / 2
 
-    return base
+# -----------------------------
+# GET GAMES TODAY
+# -----------------------------
 
-# --------- MATCHUP ---------
+def get_games():
 
-def matchup_prob(lamA, lamB):
+    today = date.today()
 
-    distA = [poisson_prob(lamA, i) for i in range(5)]
-    distB = [poisson_prob(lamB, i) for i in range(5)]
+    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
+
+    r = requests.get(url, headers=headers)
+
+    data = r.json()
+
+    games = []
+
+    for g in data["response"]:
+
+        home = g["teams"]["home"]["name"]
+        away = g["teams"]["away"]["name"]
+
+        games.append(home)
+        games.append(away)
+
+    return games
+
+# -----------------------------
+# SIMULATE MATCHUP
+# -----------------------------
+
+def matchup(lamA, lamB):
+
+    distA = distribution(lamA)
+    distB = distribution(lamB)
 
     winA = 0
-    draw = 0
     winB = 0
+    draw = 0
 
-    for i in range(5):
-        for j in range(5):
+    for i in range(6):
+        for j in range(6):
 
             p = distA[i] * distB[j]
 
             if i > j:
                 winA += p
-            elif i == j:
-                draw += p
-            else:
+            elif j > i:
                 winB += p
+            else:
+                draw += p
 
     return winA, draw, winB
 
-# --------- DATA EXAMPLE ---------
-
-teams = [
-    {"name":"RB Leipzig","attack":2.2,"opp_def":1.6,"odd":1.36},
-    {"name":"Atlético Madrid","attack":1.4,"opp_def":1.2,"odd":1.70},
-    {"name":"Atalanta","attack":2.0,"opp_def":1.5,"odd":1.70},
-    {"name":"Borussia Dortmund","attack":2.1,"opp_def":1.4,"odd":1.80},
-]
-
-# --------- FIND BEST MATCHUPS ---------
+# -----------------------------
+# FIND BEST MATCHUPS
+# -----------------------------
 
 def best_matchups():
+
+    teams = get_games()
 
     results = []
 
     for a,b in itertools.combinations(teams,2):
 
-        lamA = expected_goals(a["attack"],a["opp_def"],a["odd"])
-        lamB = expected_goals(b["attack"],b["opp_def"],b["odd"])
+        lamA = 1.5
+        lamB = 1.2
 
-        winA,draw,winB = matchup_prob(lamA,lamB)
+        winA,draw,winB = matchup(lamA,lamB)
 
-        score = winA - winB
+        edge = winA - winB
 
-        results.append({
-            "A":a["name"],
-            "B":b["name"],
-            "winA":winA,
-            "draw":draw,
-            "winB":winB,
-            "score":score
-        })
+        results.append((a,b,winA,draw,winB,edge))
 
-    results.sort(key=lambda x:x["score"],reverse=True)
+    results.sort(key=lambda x:x[5],reverse=True)
 
-    return results[:5]
+    return results[:10]
 
-# --------- TELEGRAM ---------
+# -----------------------------
+# TELEGRAM COMMAND
+# -----------------------------
 
-async def matchups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    top = best_matchups()
+    matches = best_matchups()
 
-    text = "TOP MATCHUPS DO DIA\n\n"
+    text = "🔥 TOP MATCHUPS DO DIA\n\n"
 
-    for m in top:
+    for m in matches:
 
         text += (
-            f"{m['A']} vs {m['B']}\n"
-            f"A vence: {m['winA']:.2%}\n"
-            f"Empate: {m['draw']:.2%}\n"
-            f"B vence: {m['winB']:.2%}\n\n"
+            f"{m[0]} vs {m[1]}\n"
+            f"A vence: {m[2]:.2%}\n"
+            f"Empate: {m[3]:.2%}\n"
+            f"B vence: {m[4]:.2%}\n\n"
         )
 
     await update.message.reply_text(text)
 
-# --------- RUN BOT ---------
+# -----------------------------
+# RUN BOT
+# -----------------------------
 
-app = ApplicationBuilder().token("8315861530:AAHgGl0JNKJ2fdn9lcXKmVqoU3VrZ82Afx8").build()
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-app.add_handler(CommandHandler("matchups", matchups))
+app.add_handler(CommandHandler("today", today))
+
+print("Bot rodando...")
 
 app.run_polling()
-
