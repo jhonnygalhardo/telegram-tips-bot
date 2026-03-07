@@ -30,23 +30,39 @@ def get_games():
 
     games = []
 
-    allowed = [
+    allowed_countries = [
         "Brazil",
         "USA",
         "England",
         "Spain",
         "Italy",
         "Germany",
-        "France"
+        "France",
+        "Portugal",
+        "Netherlands"
     ]
+
+    banned = ["U19", "U20", "U21", "U23", "II", " B"]
 
     for g in data.get("response", []):
 
-        if g["league"]["country"] not in allowed:
+        league_type = g["league"]["type"]
+        country = g["league"]["country"]
+
+        if league_type != "League":
+            continue
+
+        if country not in allowed_countries:
             continue
 
         home = g["teams"]["home"]["name"]
         away = g["teams"]["away"]["name"]
+
+        if any(x in home for x in banned):
+            continue
+
+        if any(x in away for x in banned):
+            continue
 
         games.append({
             "home": home,
@@ -58,7 +74,6 @@ def get_games():
 
 # -----------------------------
 # GERAR FORÇA DO TIME
-# (modelo probabilístico rápido)
 # -----------------------------
 def team_strength():
 
@@ -80,7 +95,7 @@ def expected_goals(att1, def1, att2, def2):
 
 
 # -----------------------------
-# PROBABILIDADES
+# PROBABILIDADES POISSON
 # -----------------------------
 def match_probs(xg1, xg2):
 
@@ -135,11 +150,11 @@ def analyze_games(games):
 
 
 # -----------------------------
-# COMANDO /SCAN
+# COMANDO /scan
 # -----------------------------
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("⚡ Escaneando jogos rapidamente...")
+    await update.message.reply_text("⚡ Escaneando jogos das ligas principais...")
 
     games = get_games()
 
@@ -149,7 +164,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     best = analyze_games(games)
 
-    msg = "🔥 TOP 5 OPORTUNIDADES\n\n"
+    msg = "🔥 TOP 5 JOGOS MAIS PREVISÍVEIS\n\n"
 
     for g in best:
 
@@ -168,7 +183,8 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 Bot Scanner Rápido\n\nUse /scan"
+        "🤖 Bot Scanner de Futebol\n\n"
+        "Use /scan para analisar jogos do dia."
     )
 
 
@@ -188,7 +204,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scan", scan))
 
-    print("Bot rápido rodando...")
+    print("Bot rodando...")
 
     app.run_polling()
 
