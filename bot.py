@@ -15,6 +15,9 @@ SEASON = 2024
 LEAGUE_AVG = 1.35
 
 
+# -------------------------
+# PEGAR JOGOS DO DIA
+# -------------------------
 def get_games():
 
     today = date.today()
@@ -22,7 +25,6 @@ def get_games():
     url = f"https://v3.football.api-sports.io/fixtures?date={today}"
 
     r = requests.get(url, headers=HEADERS, timeout=10)
-
     data = r.json()
 
     games = []
@@ -34,7 +36,9 @@ def get_games():
         "Spain",
         "Italy",
         "Germany",
-        "France"
+        "France",
+        "Portugal",
+        "Netherlands"
     ]
 
     for g in data.get("response", []):
@@ -43,7 +47,6 @@ def get_games():
             continue
 
         games.append({
-            "fixture_id": g["fixture"]["id"],
             "home": g["teams"]["home"]["name"],
             "away": g["teams"]["away"]["name"],
             "home_id": g["teams"]["home"]["id"],
@@ -54,13 +57,18 @@ def get_games():
     return games
 
 
+# -------------------------
+# ESTATÍSTICAS DO TIME
+# -------------------------
 def get_team_stats(team_id, league):
 
     url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league}&season={SEASON}"
 
-    r = requests.get(url, headers=HEADERS)
-
+    r = requests.get(url, headers=HEADERS, timeout=10)
     data = r.json()
+
+    if "response" not in data:
+        return None
 
     stats = data["response"]
 
@@ -78,6 +86,9 @@ def get_team_stats(team_id, league):
     return attack, defense
 
 
+# -------------------------
+# CALCULAR XG
+# -------------------------
 def expected_goals(att1, def1, att2, def2):
 
     home_xg = LEAGUE_AVG * (att1 / def2)
@@ -86,6 +97,9 @@ def expected_goals(att1, def1, att2, def2):
     return home_xg, away_xg
 
 
+# -------------------------
+# PROBABILIDADES POISSON
+# -------------------------
 def match_probs(xg1, xg2):
 
     max_goals = 5
@@ -107,31 +121,9 @@ def match_probs(xg1, xg2):
     return home, draw, away
 
 
-def get_odds(fixture):
-
-    url = f"https://v3.football.api-sports.io/odds?fixture={fixture}"
-
-    r = requests.get(url, headers=HEADERS)
-
-    data = r.json()
-
-    try:
-
-        bets = data["response"][0]["bookmakers"][0]["bets"]
-
-        for b in bets:
-
-            if b["name"] == "Match Winner":
-
-                odds = {v["value"]: float(v["odd"]) for v in b["values"]}
-
-                return odds["Home"], odds["Draw"], odds["Away"]
-
-    except:
-
-        return None
-
-
+# -------------------------
+# ANALISAR JOGOS
+# -------------------------
 def analyze_games(games):
 
     opportunities = []
@@ -144,68 +136,88 @@ def analyze_games(games):
         if not home_stats or not away_stats:
             continue
 
-        xg1, xg2 = expected_goals(*home_stats, *away_stats)
+        att1, def1 = home_stats
+        att2, def2 = away_stats
+
+        xg1, xg2 = expected_goals(att1, def1, att2, def2)
 
         p_home, p_draw, p_away = match_probs(xg1, xg2)
 
-        odds = get_odds(g["fixture_id"])
-
-        if not odds:
-            continue
-
-        o_home, o_draw, o_away = odds
-
-        fair_home = 1 / p_home
-        fair_draw = 1 / p_draw
-        fair_away = 1 / p_away
-
-        value_home = o_home - fair_home
-        value_draw = o_draw - fair_draw
-        value_away = o_away - fair_away
-
-        best = max(value_home, value_draw, value_away)
+        best_prob = max(p_home, p_draw, p_away)
 
         opportunities.append({
             "home": g["home"],
             "away": g["away"],
-            "value": best,
-            "odds": odds
+            "prob": best_prob,
+            "xg1": xg1,
+            "xg2": xg2
         })
 
-    opportunities.sort(key=lambda x: x["value"], reverse=True)
+    opportunities.sort(key=lambda x: x["prob"], reverse=True)
 
     return opportunities[:5]
 
 
-async def value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -------------------------
+# COMANDO /SCAN
+# -------------------------
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("🔎 Procurando oportunidades...")
+    await update.message.reply_text("🔎 Escaneando jogos do dia...")
 
     games = get_games()
+
+    if not games:
+        await update.message.reply_text("❌ Nenhum jogo encontrado hoje.")
+        return
 
     best = analyze_games(games)
 
     if not best:
-        await update.message.reply_text("❌ Nenhuma oportunidade encontrada")
+        await update.message.reply_text("❌ Não foi possível analisar os jogos.")
         return
 
-    msg = "💰 TOP 5 VALUE BETS DO DIA\n\n"
+    msg = "🔥 TOP 5 JOGOS MAIS PREVISÍVEIS\n\n"
 
     for g in best:
 
-        msg += f"{g['home']} vs {g['away']}\n"
-        msg += f"Value: {g['value']:.2f}\n\n"
+        msg += (
+            f"{g['home']} vs {g['away']}\n"
+            f"xG: {g['xg1']:.2f}-{g['xg2']:.2f}\n"
+            f"Confiança: {g['prob']*100:.1f}%\n\n"
+        )
 
     await update.message.reply_text(msg)
 
 
+# -------------------------
+# START
+# -------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "🤖 Bot Scanner de Futebol\n\n"
+        "Use /scan para encontrar oportunidades do dia."
+    )
+
+
+# -------------------------
+# MAIN
+# -------------------------
 def main():
+
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN não definido")
+
+    if not API_KEY:
+        raise ValueError("API_KEY não definida")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("value", value))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("scan", scan))
 
-    print("Scanner rodando...")
+    print("Bot scanner rodando...")
 
     app.run_polling()
 
