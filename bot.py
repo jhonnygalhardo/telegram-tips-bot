@@ -4,8 +4,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from datetime import date
 
-TOKEN = "SEU_TOKEN_TELEGRAM"
-API_KEY = "SUA_API_KEY_API_FOOTBALL"
+TOKEN = "8315861530:AAHgGl0JNKJ2fdn9lcXKmVqoU3VrZ82Afx8"
+API_KEY = "66a2917b1bfcdc820491650b86a28f75"
 
 headers = {
     "x-apisports-key": API_KEY
@@ -124,3 +124,4 @@ if __name__ == "__main__":
     print("Bot rodando...")
 
     app.run_polling()
+
