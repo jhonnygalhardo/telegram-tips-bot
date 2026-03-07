@@ -1,12 +1,10 @@
 import os
 import requests
-import numpy as np
 from datetime import date
+from scipy.stats import poisson
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-from scipy.stats import poisson
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
@@ -24,6 +22,7 @@ def get_games():
     url = f"https://v3.football.api-sports.io/fixtures?date={today}"
 
     r = requests.get(url, headers=HEADERS, timeout=10)
+
     data = r.json()
 
     games = []
@@ -35,19 +34,16 @@ def get_games():
         "Spain",
         "Italy",
         "Germany",
-        "France",
-        "Portugal",
-        "Netherlands"
+        "France"
     ]
 
     for g in data.get("response", []):
 
-        country = g["league"]["country"]
-
-        if country not in allowed:
+        if g["league"]["country"] not in allowed:
             continue
 
         games.append({
+            "fixture_id": g["fixture"]["id"],
             "home": g["teams"]["home"]["name"],
             "away": g["teams"]["away"]["name"],
             "home_id": g["teams"]["home"]["id"],
@@ -62,12 +58,9 @@ def get_team_stats(team_id, league):
 
     url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league}&season={SEASON}"
 
-    r = requests.get(url, headers=HEADERS, timeout=10)
+    r = requests.get(url, headers=HEADERS)
 
     data = r.json()
-
-    if "response" not in data:
-        return None
 
     stats = data["response"]
 
@@ -93,41 +86,55 @@ def expected_goals(att1, def1, att2, def2):
     return home_xg, away_xg
 
 
-def poisson_probs(xg_home, xg_away):
+def match_probs(xg1, xg2):
 
     max_goals = 5
 
-    probs = {}
-
-    home_win = 0
-    draw = 0
-    away_win = 0
-
-    over25 = 0
+    home = draw = away = 0
 
     for i in range(max_goals):
         for j in range(max_goals):
 
-            p = poisson.pmf(i, xg_home) * poisson.pmf(j, xg_away)
-
-            probs[(i, j)] = p
+            p = poisson.pmf(i, xg1) * poisson.pmf(j, xg2)
 
             if i > j:
-                home_win += p
+                home += p
             elif i == j:
                 draw += p
             else:
-                away_win += p
+                away += p
 
-            if i + j > 2:
-                over25 += p
+    return home, draw, away
 
-    return home_win, draw, away_win, over25, probs
+
+def get_odds(fixture):
+
+    url = f"https://v3.football.api-sports.io/odds?fixture={fixture}"
+
+    r = requests.get(url, headers=HEADERS)
+
+    data = r.json()
+
+    try:
+
+        bets = data["response"][0]["bookmakers"][0]["bets"]
+
+        for b in bets:
+
+            if b["name"] == "Match Winner":
+
+                odds = {v["value"]: float(v["odd"]) for v in b["values"]}
+
+                return odds["Home"], odds["Draw"], odds["Away"]
+
+    except:
+
+        return None
 
 
 def analyze_games(games):
 
-    results = []
+    opportunities = []
 
     for g in games:
 
@@ -137,76 +144,68 @@ def analyze_games(games):
         if not home_stats or not away_stats:
             continue
 
-        att1, def1 = home_stats
-        att2, def2 = away_stats
+        xg1, xg2 = expected_goals(*home_stats, *away_stats)
 
-        xg1, xg2 = expected_goals(att1, def1, att2, def2)
+        p_home, p_draw, p_away = match_probs(xg1, xg2)
 
-        home_win, draw, away_win, over25, probs = poisson_probs(xg1, xg2)
+        odds = get_odds(g["fixture_id"])
 
-        most_likely = max(probs, key=probs.get)
+        if not odds:
+            continue
 
-        results.append({
+        o_home, o_draw, o_away = odds
+
+        fair_home = 1 / p_home
+        fair_draw = 1 / p_draw
+        fair_away = 1 / p_away
+
+        value_home = o_home - fair_home
+        value_draw = o_draw - fair_draw
+        value_away = o_away - fair_away
+
+        best = max(value_home, value_draw, value_away)
+
+        opportunities.append({
             "home": g["home"],
             "away": g["away"],
-            "xg1": xg1,
-            "xg2": xg2,
-            "home_win": home_win,
-            "draw": draw,
-            "away_win": away_win,
-            "over25": over25,
-            "score": most_likely
+            "value": best,
+            "odds": odds
         })
 
-    results.sort(key=lambda x: abs(x["xg1"] - x["xg2"]))
+    opportunities.sort(key=lambda x: x["value"], reverse=True)
 
-    return results[:10]
+    return opportunities[:5]
 
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("📊 Analisando jogos com modelo PRO...")
+    await update.message.reply_text("🔎 Procurando oportunidades...")
 
     games = get_games()
 
-    if not games:
-        await update.message.reply_text("❌ Nenhum jogo encontrado.")
+    best = analyze_games(games)
+
+    if not best:
+        await update.message.reply_text("❌ Nenhuma oportunidade encontrada")
         return
 
-    analysis = analyze_games(games)
+    msg = "💰 TOP 5 VALUE BETS DO DIA\n\n"
 
-    msg = "🏆 TOP MATCHUPS DO DIA\n\n"
+    for g in best:
 
-    for g in analysis:
-
-        msg += (
-            f"{g['home']} vs {g['away']}\n"
-            f"xG: {g['xg1']:.2f} - {g['xg2']:.2f}\n"
-            f"Casa: {g['home_win']*100:.1f}%\n"
-            f"Empate: {g['draw']*100:.1f}%\n"
-            f"Fora: {g['away_win']*100:.1f}%\n"
-            f"Over2.5: {g['over25']*100:.1f}%\n"
-            f"Placar provável: {g['score'][0]}-{g['score'][1]}\n\n"
-        )
+        msg += f"{g['home']} vs {g['away']}\n"
+        msg += f"Value: {g['value']:.2f}\n\n"
 
     await update.message.reply_text(msg)
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text(
-        "🤖 Bot PRO de análise de futebol\n\nUse /today"
-    )
 
 
 def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("value", value))
 
-    print("Bot PRO rodando...")
+    print("Scanner rodando...")
 
     app.run_polling()
 
