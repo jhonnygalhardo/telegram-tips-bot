@@ -14,9 +14,9 @@ headers = {
     "x-apisports-key": API_KEY
 }
 
-# -----------------------------
+# ----------------------------
 # POISSON
-# -----------------------------
+# ----------------------------
 
 def poisson(lam, k):
     return (math.exp(-lam) * lam**k) / math.factorial(k)
@@ -32,48 +32,11 @@ def distribution(lam):
 
     return probs
 
-# -----------------------------
-# EXPECTED GOALS
-# -----------------------------
+# ----------------------------
+# MATCHUP
+# ----------------------------
 
-def expected_goals(scored, conceded):
-
-    attack = scored / 10
-    defense = conceded / 10
-
-    return (attack + defense) / 2
-
-# -----------------------------
-# GET GAMES TODAY
-# -----------------------------
-
-def get_games():
-
-    today = date.today()
-
-    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
-
-    r = requests.get(url, headers=headers)
-
-    data = r.json()
-
-    games = []
-
-    for g in data["response"]:
-
-        home = g["teams"]["home"]["name"]
-        away = g["teams"]["away"]["name"]
-
-        games.append(home)
-        games.append(away)
-
-    return games
-
-# -----------------------------
-# SIMULATE MATCHUP
-# -----------------------------
-
-def matchup(lamA, lamB):
+def simulate(lamA, lamB):
 
     distA = distribution(lamA)
     distB = distribution(lamB)
@@ -96,9 +59,35 @@ def matchup(lamA, lamB):
 
     return winA, draw, winB
 
-# -----------------------------
-# FIND BEST MATCHUPS
-# -----------------------------
+# ----------------------------
+# PEGAR JOGOS DO DIA
+# ----------------------------
+
+def get_games():
+
+    today = date.today()
+
+    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
+
+    r = requests.get(url, headers=headers)
+
+    data = r.json()
+
+    teams = []
+
+    for g in data["response"]:
+
+        home = g["teams"]["home"]["name"]
+        away = g["teams"]["away"]["name"]
+
+        teams.append(home)
+        teams.append(away)
+
+    return teams
+
+# ----------------------------
+# ENCONTRAR MATCHUPS
+# ----------------------------
 
 def best_matchups():
 
@@ -108,10 +97,10 @@ def best_matchups():
 
     for a,b in itertools.combinations(teams,2):
 
-        lamA = 1.5
+        lamA = 1.8
         lamB = 1.2
 
-        winA,draw,winB = matchup(lamA,lamB)
+        winA,draw,winB = simulate(lamA,lamB)
 
         edge = winA - winB
 
@@ -121,35 +110,52 @@ def best_matchups():
 
     return results[:10]
 
-# -----------------------------
-# TELEGRAM COMMAND
-# -----------------------------
+# ----------------------------
+# TELEGRAM
+# ----------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "Bot de Matchups ⚽\n\nUse /today para analisar jogos do dia"
+    )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    matches = best_matchups()
+    await update.message.reply_text("Analisando jogos do dia...")
 
-    text = "🔥 TOP MATCHUPS DO DIA\n\n"
+    try:
 
-    for m in matches:
+        matches = best_matchups()
 
-        text += (
-            f"{m[0]} vs {m[1]}\n"
-            f"A vence: {m[2]:.2%}\n"
-            f"Empate: {m[3]:.2%}\n"
-            f"B vence: {m[4]:.2%}\n\n"
-        )
+        text = "🔥 TOP MATCHUPS DO DIA\n\n"
 
-    await update.message.reply_text(text)
+        for m in matches:
 
-# -----------------------------
+            text += (
+                f"{m[0]} vs {m[1]}\n"
+                f"A vence: {m[2]:.2%}\n"
+                f"Empate: {m[3]:.2%}\n"
+                f"B vence: {m[4]:.2%}\n\n"
+            )
+
+        await update.message.reply_text(text)
+
+    except Exception as e:
+
+        print("Erro:", e)
+
+        await update.message.reply_text("Erro ao analisar jogos.")
+
+# ----------------------------
 # RUN BOT
-# -----------------------------
+# ----------------------------
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("today", today))
 
 print("Bot rodando...")
 
-app.run_polling()
+app.run_polling(drop_pending_updates=True)
