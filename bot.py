@@ -115,8 +115,9 @@ async def matchups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --------- RUN BOT ---------
 
-app = ApplicationBuilder().token("SEU_TOKEN_TELEGRAM").build()
+app = ApplicationBuilder().token("8315861530:AAHgGl0JNKJ2fdn9lcXKmVqoU3VrZ82Afx8").build()
 
 app.add_handler(CommandHandler("matchups", matchups))
 
 app.run_polling()
+
