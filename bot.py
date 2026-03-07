@@ -1,20 +1,19 @@
 import os
 import requests
+import numpy as np
 from datetime import date
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+from scipy.stats import poisson
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
 
-headers = {
-    "x-apisports-key": API_KEY
-}
+HEADERS = {"x-apisports-key": API_KEY}
 
 SEASON = 2024
-
-# média de gols por time
 LEAGUE_AVG = 1.35
 
 
@@ -24,8 +23,7 @@ def get_games():
 
     url = f"https://v3.football.api-sports.io/fixtures?date={today}"
 
-    r = requests.get(url, headers=headers, timeout=10)
-
+    r = requests.get(url, headers=HEADERS, timeout=10)
     data = r.json()
 
     games = []
@@ -64,7 +62,7 @@ def get_team_stats(team_id, league):
 
     url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league}&season={SEASON}"
 
-    r = requests.get(url, headers=headers, timeout=10)
+    r = requests.get(url, headers=HEADERS, timeout=10)
 
     data = r.json()
 
@@ -95,7 +93,39 @@ def expected_goals(att1, def1, att2, def2):
     return home_xg, away_xg
 
 
-def analyze_matchups(games):
+def poisson_probs(xg_home, xg_away):
+
+    max_goals = 5
+
+    probs = {}
+
+    home_win = 0
+    draw = 0
+    away_win = 0
+
+    over25 = 0
+
+    for i in range(max_goals):
+        for j in range(max_goals):
+
+            p = poisson.pmf(i, xg_home) * poisson.pmf(j, xg_away)
+
+            probs[(i, j)] = p
+
+            if i > j:
+                home_win += p
+            elif i == j:
+                draw += p
+            else:
+                away_win += p
+
+            if i + j > 2:
+                over25 += p
+
+    return home_win, draw, away_win, over25, probs
+
+
+def analyze_games(games):
 
     results = []
 
@@ -112,24 +142,30 @@ def analyze_matchups(games):
 
         xg1, xg2 = expected_goals(att1, def1, att2, def2)
 
-        diff = abs(xg1 - xg2)
+        home_win, draw, away_win, over25, probs = poisson_probs(xg1, xg2)
+
+        most_likely = max(probs, key=probs.get)
 
         results.append({
             "home": g["home"],
             "away": g["away"],
             "xg1": xg1,
             "xg2": xg2,
-            "balance": diff
+            "home_win": home_win,
+            "draw": draw,
+            "away_win": away_win,
+            "over25": over25,
+            "score": most_likely
         })
 
-    results.sort(key=lambda x: x["balance"])
+    results.sort(key=lambda x: abs(x["xg1"] - x["xg2"]))
 
     return results[:10]
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("📊 Analisando jogos reais do dia...")
+    await update.message.reply_text("📊 Analisando jogos com modelo PRO...")
 
     games = get_games()
 
@@ -137,15 +173,20 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Nenhum jogo encontrado.")
         return
 
-    matchups = analyze_matchups(games)
+    analysis = analyze_games(games)
 
-    msg = "🏆 MELHORES MATCHUPS (dados reais)\n\n"
+    msg = "🏆 TOP MATCHUPS DO DIA\n\n"
 
-    for m in matchups:
+    for g in analysis:
 
         msg += (
-            f"{m['home']} vs {m['away']}\n"
-            f"xG: {m['xg1']:.2f} - {m['xg2']:.2f}\n\n"
+            f"{g['home']} vs {g['away']}\n"
+            f"xG: {g['xg1']:.2f} - {g['xg2']:.2f}\n"
+            f"Casa: {g['home_win']*100:.1f}%\n"
+            f"Empate: {g['draw']*100:.1f}%\n"
+            f"Fora: {g['away_win']*100:.1f}%\n"
+            f"Over2.5: {g['over25']*100:.1f}%\n"
+            f"Placar provável: {g['score'][0]}-{g['score'][1]}\n\n"
         )
 
     await update.message.reply_text(msg)
@@ -154,7 +195,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 Bot de análise de futebol\n\nUse /today para analisar jogos do dia."
+        "🤖 Bot PRO de análise de futebol\n\nUse /today"
     )
 
 
@@ -165,7 +206,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
 
-    print("Bot rodando...")
+    print("Bot PRO rodando...")
 
     app.run_polling()
 
