@@ -1,161 +1,126 @@
-import os
-import math
 import requests
-import itertools
-from datetime import date
-
+import numpy as np
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import date
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_KEY = os.getenv("FOOTBALL_API")
+TOKEN = "SEU_TOKEN_TELEGRAM"
+API_KEY = "SUA_API_KEY_API_FOOTBALL"
 
 headers = {
     "x-apisports-key": API_KEY
 }
 
-# ----------------------------
-# POISSON
-# ----------------------------
-
-def poisson(lam, k):
-    return (math.exp(-lam) * lam**k) / math.factorial(k)
-
-def distribution(lam):
-
-    probs = []
-
-    for i in range(5):
-        probs.append(poisson(lam,i))
-
-    probs.append(1 - sum(probs))
-
-    return probs
-
-# ----------------------------
-# MATCHUP
-# ----------------------------
-
-def simulate(lamA, lamB):
-
-    distA = distribution(lamA)
-    distB = distribution(lamB)
-
-    winA = 0
-    winB = 0
-    draw = 0
-
-    for i in range(6):
-        for j in range(6):
-
-            p = distA[i] * distB[j]
-
-            if i > j:
-                winA += p
-            elif j > i:
-                winB += p
-            else:
-                draw += p
-
-    return winA, draw, winB
-
-# ----------------------------
-# PEGAR JOGOS DO DIA
-# ----------------------------
+# ligas que vamos analisar
+LEAGUES = [
+    39,   # Premier League
+    140,  # La Liga
+    135,  # Serie A
+    78,   # Bundesliga
+    61,   # Ligue 1
+    71,   # Brasileirão
+    253   # MLS
+]
 
 def get_games():
 
     today = date.today()
 
-    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
-
-    r = requests.get(url, headers=headers)
-
-    data = r.json()
-
     teams = []
 
-    for g in data["response"]:
+    for league in LEAGUES:
 
-        home = g["teams"]["home"]["name"]
-        away = g["teams"]["away"]["name"]
+        url = f"https://v3.football.api-sports.io/fixtures?league={league}&date={today}"
 
-        teams.append(home)
-        teams.append(away)
+        r = requests.get(url, headers=headers, timeout=10)
 
-    return teams
+        data = r.json()
 
-# ----------------------------
-# ENCONTRAR MATCHUPS
-# ----------------------------
+        for g in data.get("response", []):
 
-def best_matchups():
+            home = g["teams"]["home"]["name"]
+            away = g["teams"]["away"]["name"]
 
-    teams = get_games()
+            teams.append(home)
+            teams.append(away)
+
+    return list(set(teams))
+
+
+def random_strength(team):
+
+    attack = np.random.uniform(0.8, 2.2)
+    defense = np.random.uniform(0.8, 2.2)
+
+    return attack, defense
+
+
+def expected_goals(att, defn):
+
+    return (att + defn) / 2
+
+
+def analyze_matchups(teams):
 
     results = []
 
-    for a,b in itertools.combinations(teams,2):
+    for i in range(len(teams)):
+        for j in range(i+1, len(teams)):
 
-        lamA = 1.8
-        lamB = 1.2
+            t1 = teams[i]
+            t2 = teams[j]
 
-        winA,draw,winB = simulate(lamA,lamB)
+            att1, def1 = random_strength(t1)
+            att2, def2 = random_strength(t2)
 
-        edge = winA - winB
+            g1 = expected_goals(att1, def2)
+            g2 = expected_goals(att2, def1)
 
-        results.append((a,b,winA,draw,winB,edge))
+            diff = abs(g1 - g2)
 
-    results.sort(key=lambda x:x[5],reverse=True)
+            results.append({
+                "team1": t1,
+                "team2": t2,
+                "g1": g1,
+                "g2": g2,
+                "balance": diff
+            })
+
+    results.sort(key=lambda x: x["balance"])
 
     return results[:10]
 
-# ----------------------------
-# TELEGRAM
-# ----------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text(
-        "Bot de Matchups ⚽\n\nUse /today para analisar jogos do dia"
-    )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("Analisando jogos do dia...")
+    await update.message.reply_text("🔎 Analisando jogos da Europa, Brasil e EUA...")
 
-    try:
+    teams = get_games()
 
-        matches = best_matchups()
+    if len(teams) < 2:
+        await update.message.reply_text("❌ Nenhum jogo encontrado hoje.")
+        return
 
-        text = "🔥 TOP MATCHUPS DO DIA\n\n"
+    matchups = analyze_matchups(teams)
 
-        for m in matches:
+    msg = "🏆 MELHORES MATCHUPS VIRTUAIS\n\n"
 
-            text += (
-                f"{m[0]} vs {m[1]}\n"
-                f"A vence: {m[2]:.2%}\n"
-                f"Empate: {m[3]:.2%}\n"
-                f"B vence: {m[4]:.2%}\n\n"
-            )
+    for m in matchups:
 
-        await update.message.reply_text(text)
+        msg += (
+            f"{m['team1']} vs {m['team2']}\n"
+            f"⚽ xG: {m['g1']:.2f} - {m['g2']:.2f}\n\n"
+        )
 
-    except Exception as e:
+    await update.message.reply_text(msg)
 
-        print("Erro:", e)
 
-        await update.message.reply_text("Erro ao analisar jogos.")
+if __name__ == "__main__":
 
-# ----------------------------
-# RUN BOT
-# ----------------------------
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("today", today))
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("today", today))
+    print("Bot rodando...")
 
-print("Bot rodando...")
-
-app.run_polling(drop_pending_updates=True)
+    app.run_polling()
