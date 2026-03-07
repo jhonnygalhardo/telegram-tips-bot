@@ -1,6 +1,5 @@
 import os
 import requests
-import numpy as np
 from datetime import date
 
 from telegram import Update
@@ -13,6 +12,11 @@ headers = {
     "x-apisports-key": API_KEY
 }
 
+SEASON = 2024
+
+# média de gols por time
+LEAGUE_AVG = 1.35
+
 
 def get_games():
 
@@ -24,9 +28,9 @@ def get_games():
 
     data = r.json()
 
-    teams = []
+    games = []
 
-    allowed_countries = [
+    allowed = [
         "Brazil",
         "USA",
         "England",
@@ -42,56 +46,81 @@ def get_games():
 
         country = g["league"]["country"]
 
-        if country not in allowed_countries:
+        if country not in allowed:
             continue
 
-        home = g["teams"]["home"]["name"]
-        away = g["teams"]["away"]["name"]
+        games.append({
+            "home": g["teams"]["home"]["name"],
+            "away": g["teams"]["away"]["name"],
+            "home_id": g["teams"]["home"]["id"],
+            "away_id": g["teams"]["away"]["id"],
+            "league": g["league"]["id"]
+        })
 
-        teams.append(home)
-        teams.append(away)
-
-    return list(set(teams))
+    return games
 
 
-def random_strength():
+def get_team_stats(team_id, league):
 
-    attack = np.random.uniform(0.8, 2.2)
-    defense = np.random.uniform(0.8, 2.2)
+    url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league}&season={SEASON}"
+
+    r = requests.get(url, headers=headers, timeout=10)
+
+    data = r.json()
+
+    if "response" not in data:
+        return None
+
+    stats = data["response"]
+
+    played = stats["fixtures"]["played"]["total"]
+
+    if played == 0:
+        return None
+
+    goals_for = stats["goals"]["for"]["total"]["total"]
+    goals_against = stats["goals"]["against"]["total"]["total"]
+
+    attack = goals_for / played
+    defense = goals_against / played
 
     return attack, defense
 
 
-def expected_goals(att, defn):
+def expected_goals(att1, def1, att2, def2):
 
-    return (att + defn) / 2
+    home_xg = LEAGUE_AVG * (att1 / def2)
+    away_xg = LEAGUE_AVG * (att2 / def1)
+
+    return home_xg, away_xg
 
 
-def analyze_matchups(teams):
+def analyze_matchups(games):
 
     results = []
 
-    for i in range(len(teams)):
-        for j in range(i + 1, len(teams)):
+    for g in games:
 
-            t1 = teams[i]
-            t2 = teams[j]
+        home_stats = get_team_stats(g["home_id"], g["league"])
+        away_stats = get_team_stats(g["away_id"], g["league"])
 
-            att1, def1 = random_strength()
-            att2, def2 = random_strength()
+        if not home_stats or not away_stats:
+            continue
 
-            g1 = expected_goals(att1, def2)
-            g2 = expected_goals(att2, def1)
+        att1, def1 = home_stats
+        att2, def2 = away_stats
 
-            diff = abs(g1 - g2)
+        xg1, xg2 = expected_goals(att1, def1, att2, def2)
 
-            results.append({
-                "team1": t1,
-                "team2": t2,
-                "g1": g1,
-                "g2": g2,
-                "balance": diff
-            })
+        diff = abs(xg1 - xg2)
+
+        results.append({
+            "home": g["home"],
+            "away": g["away"],
+            "xg1": xg1,
+            "xg2": xg2,
+            "balance": diff
+        })
 
     results.sort(key=lambda x: x["balance"])
 
@@ -100,25 +129,23 @@ def analyze_matchups(teams):
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text(
-        "🔎 Analisando jogos da Europa, Brasil e EUA..."
-    )
+    await update.message.reply_text("📊 Analisando jogos reais do dia...")
 
-    teams = get_games()
+    games = get_games()
 
-    if len(teams) < 2:
-        await update.message.reply_text("❌ Nenhum jogo encontrado hoje.")
+    if not games:
+        await update.message.reply_text("❌ Nenhum jogo encontrado.")
         return
 
-    matchups = analyze_matchups(teams)
+    matchups = analyze_matchups(games)
 
-    msg = "🏆 MELHORES MATCHUPS VIRTUAIS\n\n"
+    msg = "🏆 MELHORES MATCHUPS (dados reais)\n\n"
 
     for m in matchups:
 
         msg += (
-            f"{m['team1']} vs {m['team2']}\n"
-            f"⚽ xG: {m['g1']:.2f} - {m['g2']:.2f}\n\n"
+            f"{m['home']} vs {m['away']}\n"
+            f"xG: {m['xg1']:.2f} - {m['xg2']:.2f}\n\n"
         )
 
     await update.message.reply_text(msg)
@@ -127,17 +154,11 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 Bot de Matchups\n\nUse /today para analisar jogos do dia."
+        "🤖 Bot de análise de futebol\n\nUse /today para analisar jogos do dia."
     )
 
 
 def main():
-
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN não definido")
-
-    if not API_KEY:
-        raise ValueError("API_KEY não definida")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
